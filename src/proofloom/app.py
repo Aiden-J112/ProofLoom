@@ -10,7 +10,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from proofloom.sources import SourceImportError, import_markdown
+from proofloom.sources import (
+    SourceImportError,
+    import_markdown,
+    merge_source_fragments,
+    write_source_fragments,
+)
 
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
@@ -384,11 +389,24 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             metadata = json.loads(_metadata_path(project_path).read_text(encoding="utf-8"))
             if metadata.get("schema_version") != PROJECT_SCHEMA_VERSION:
                 raise ValueError("Unsupported project schema version")
-            fragments = import_markdown(source_path)
-            _fragments_path(project_path).write_text(
-                json.dumps(fragments, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+            imported = import_markdown(source_path, self.server.browse_root)
+            fragments_path = _fragments_path(project_path)
+            try:
+                existing = json.loads(fragments_path.read_text(encoding="utf-8"))
+                if not isinstance(existing, list):
+                    raise ValueError("Stored Source Fragments must be a list")
+            except FileNotFoundError:
+                existing = []
+            source_locator = source_path.relative_to(
+                self.server.browse_root
+            ).as_posix()
+            fragments = merge_source_fragments(
+                existing,
+                imported,
+                source_locator,
+                source_path.is_dir(),
             )
+            write_source_fragments(fragments_path, fragments)
         except (OSError, json.JSONDecodeError, SourceImportError, ValueError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
