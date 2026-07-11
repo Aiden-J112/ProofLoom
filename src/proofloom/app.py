@@ -5,11 +5,22 @@ import html
 import ipaddress
 import json
 import secrets
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from proofloom.entities import (
+    ENTITY_TYPES,
+    EntityConflictError,
+    EntityDictionaryError,
+    accept_candidate,
+    load_dictionary,
+    submit_candidate,
+    update_entity,
+    write_dictionary,
+)
 from proofloom.sources import (
     SourceImportError,
     import_markdown,
@@ -113,6 +124,52 @@ def _fragments_path(project_path: Path) -> Path:
     return project_path / METADATA_DIRECTORY / "source-fragments.json"
 
 
+def _entities_path(project_path: Path) -> Path:
+    return project_path / METADATA_DIRECTORY / "entity-dictionary.json"
+
+
+def _entity_dictionary_page(
+    project_path: Path, dictionary: dict[str, object], csrf_token: str
+) -> bytes:
+    project = html.escape(str(project_path))
+    accepted = "".join(
+        "<article>"
+        f"<h4>{html.escape(str(entity['canonical_name']))}</h4>"
+        f"<p>ID: {html.escape(str(entity['id']))}</p>"
+        f"<p>Type: {html.escape(str(entity['type']))}</p><p>Status: accepted</p>"
+        '<form method="post" action="/entities/update">'
+        f"{_csrf_field(csrf_token)}"
+        f'<input type="hidden" name="project" value="{project}">'
+        f'<input type="hidden" name="entity_id" value="{html.escape(str(entity["id"]))}">'
+        f'<label>Display name <input name="display_name" value="{html.escape(str(entity["canonical_name"]))}" required></label>'
+        f'<label>Aliases (comma separated) <input name="aliases" value="{html.escape(", ".join(map(str, entity["aliases"]))) }"></label>'
+        '<button type="submit">Update entity</button></form></article>'
+        for entity in dictionary["entities"]
+    )
+    options = "".join(f'<option value="{kind}">{kind}</option>' for kind in ENTITY_TYPES)
+    candidates = "".join(
+        "<article>"
+        f"<h4>{html.escape(str(candidate['name']))}</h4><p>Status: candidate</p>"
+        '<form method="post" action="/entities/accept">'
+        f"{_csrf_field(csrf_token)}"
+        f'<input type="hidden" name="project" value="{project}">'
+        f'<input type="hidden" name="candidate_id" value="{html.escape(str(candidate["id"]))}">'
+        f'<label>Controlled type <select name="entity_type">{options}</select></label>'
+        '<button type="submit">Accept entity</button></form></article>'
+        for candidate in dictionary["candidates"]
+    )
+    return _page(
+        "<h2>Entity Dictionary</h2>"
+        '<h3>Submit an unknown name</h3><form method="post" action="/entities/candidates">'
+        f"{_csrf_field(csrf_token)}"
+        f'<input type="hidden" name="project" value="{project}">'
+        '<label>Name <input name="name" required></label>'
+        '<button type="submit">Submit candidate</button></form>'
+        f"<h3>Candidate entities</h3>{candidates or '<p>No candidate entities.</p>'}"
+        f"<h3>Accepted entities</h3>{accepted or '<p>No accepted entities.</p>'}"
+    )
+
+
 def _source_page(
     root: Path,
     current: Path,
@@ -187,6 +244,7 @@ def _project_page(
         '<input name="source" required></label>'
         '<button type="submit">Import</button></form>'
         f'<p><a href="/sources?project={quote(str(project_path))}">Choose Markdown source</a></p>'
+        f'<p><a href="/entities?project={quote(str(project_path))}">Review Entity Dictionary</a></p>'
         f"<h3>Source Fragments</h3>{fragment_items or '<p>No Source Fragments imported.</p>'}"
     )
 
@@ -211,6 +269,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._browse_directories(query)
         elif request.path == "/sources":
             self._browse_sources(query)
+        elif request.path == "/entities":
+            self._show_entities(query)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -229,6 +289,12 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._create_directory(form)
         elif self.path == "/sources/import":
             self._import_sources(form)
+        elif self.path == "/entities/candidates":
+            self._submit_entity_candidate(form)
+        elif self.path == "/entities/accept":
+            self._accept_entity(form)
+        elif self.path == "/entities/update":
+            self._update_entity(form)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -282,6 +348,60 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
                 self.server.csrf_token,
                 selected,
             )
+        )
+
+    def _entity_project(self, raw_path: str) -> Path:
+        project_path = self._local_path(raw_path)
+        if not _metadata_path(project_path).is_file():
+            raise EntityDictionaryError("Knowledge Project does not exist")
+        return project_path
+
+    def _show_entities(self, query: dict[str, list[str]]) -> None:
+        try:
+            project_path = self._entity_project(query.get("project", [""])[0])
+            dictionary = load_dictionary(_entities_path(project_path))
+        except (OSError, ValueError, EntityDictionaryError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(_entity_dictionary_page(project_path, dictionary, self.server.csrf_token))
+
+    def _mutate_dictionary(self, form: dict[str, str], operation) -> None:
+        try:
+            project_path = self._entity_project(form.get("project", ""))
+            path = _entities_path(project_path)
+            with self.server.entity_dictionary_lock:
+                dictionary = load_dictionary(path)
+                operation(dictionary)
+                write_dictionary(path, dictionary)
+        except EntityConflictError as error:
+            self.send_error(HTTPStatus.CONFLICT, str(error))
+            return
+        except (OSError, ValueError, EntityDictionaryError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(_entity_dictionary_page(project_path, dictionary, self.server.csrf_token))
+
+    def _submit_entity_candidate(self, form: dict[str, str]) -> None:
+        self._mutate_dictionary(form, lambda data: submit_candidate(data, form.get("name", "")))
+
+    def _accept_entity(self, form: dict[str, str]) -> None:
+        self._mutate_dictionary(
+            form,
+            lambda data: accept_candidate(
+                data, form.get("candidate_id", ""), form.get("entity_type", "")
+            ),
+        )
+
+    def _update_entity(self, form: dict[str, str]) -> None:
+        aliases = form.get("aliases", "").split(",")
+        self._mutate_dictionary(
+            form,
+            lambda data: update_entity(
+                data,
+                form.get("entity_id", ""),
+                form.get("display_name", ""),
+                aliases,
+            ),
         )
 
     def _create_directory(self, form: dict[str, str]) -> None:
@@ -429,6 +549,7 @@ class ProofLoomServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], browse_root: Path):
         self.browse_root = browse_root.expanduser().resolve()
         self.csrf_token = secrets.token_urlsafe(32)
+        self.entity_dictionary_lock = threading.Lock()
         super().__init__(address, ProofLoomRequestHandler)
 
 
