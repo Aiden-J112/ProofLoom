@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofloom.local/schemas/entity-dictionary.schema.json",
+  "title": "ProofLoom Entity Dictionary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entities", "candidates"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "entities": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/acceptedEntity"}
+    },
+    "candidates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/candidateEntity"}
+    }
+  },
+  "$defs": {
+    "nonBlankString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "acceptedEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "canonical_name", "type", "aliases", "status", "schema_version"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^entity_[a-f0-9]{24}$"},
+        "canonical_name": {"$ref": "#/$defs/nonBlankString"},
+        "type": {"enum": ["Component", "Artifact", "Pattern", "Concept"]},
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonBlankString"}
+        },
+        "status": {"const": "accepted"},
+        "schema_version": {"const": "1"}
+      }
+    },
+    "candidateEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^candidate_[a-f0-9]{24}$"},
+        "name": {"$ref": "#/$defs/nonBlankString"},
+        "status": {"const": "candidate"}
+      }
+    }
+  }
+}

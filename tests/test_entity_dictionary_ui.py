@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 import unittest
 import urllib.error
@@ -12,6 +13,43 @@ from test_source_import_ui import create_project
 
 
 class EntityDictionaryUiTests(unittest.TestCase):
+    def test_invalid_stored_dictionary_is_rejected_with_field_path_and_not_overwritten(self):
+        invalid_variants = {
+            "extra field": ({"unexpected": True}, "unexpected"),
+            "invalid type": ({"entities": [{
+                "id": "entity_000000000000000000000000", "canonical_name": "Bad", "type": "Person",
+                "aliases": [], "status": "accepted", "schema_version": "1",
+            }]}, "entities.0.type"),
+            "invalid status": ({"candidates": [{
+                "id": "candidate_000000000000000000000000", "name": "Bad", "status": "accepted",
+            }]}, "candidates.0.status"),
+            "missing field": ({"candidates": [{
+                "id": "candidate_000000000000000000000000", "status": "candidate",
+            }]}, "candidates.0"),
+        }
+        for label, (changes, expected_path) in invalid_variants.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as root:
+                root_path = Path(root)
+                project_path = root_path / "project"
+                project_path.mkdir()
+                with RunningApplication(root_path) as app:
+                    create_project(app, project_path)
+                    dictionary = {
+                        "schema_version": "1", "entities": [], "candidates": []
+                    }
+                    dictionary.update(changes)
+                    stored = project_path / ".proofloom" / "entity-dictionary.json"
+                    stored.write_text(json.dumps(dictionary), encoding="utf-8")
+                    original = stored.read_bytes()
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        open_page(
+                            app,
+                            f"/entities?project={urllib.parse.quote(str(project_path))}",
+                        )
+                    self.assertEqual(400, error.exception.code)
+                    self.assertIn(expected_path, error.exception.read().decode())
+                    self.assertEqual(original, stored.read_bytes())
+
     def test_unknown_name_is_candidate_until_reviewed_with_controlled_type(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)

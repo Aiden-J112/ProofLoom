@@ -4,10 +4,21 @@ import json
 import os
 import secrets
 import tempfile
+from importlib.resources import files
 from pathlib import Path
 
-ENTITY_TYPES = ("Component", "Artifact", "Pattern", "Concept")
+from jsonschema import Draft202012Validator
+
 ENTITY_DICTIONARY_SCHEMA_VERSION = "1"
+
+_SCHEMA = json.loads(
+    files("proofloom").joinpath("schemas/entity-dictionary.schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+Draft202012Validator.check_schema(_SCHEMA)
+_SCHEMA_VALIDATOR = Draft202012Validator(_SCHEMA)
+ENTITY_TYPES = tuple(_SCHEMA["$defs"]["acceptedEntity"]["properties"]["type"]["enum"])
 
 
 class EntityDictionaryError(ValueError):
@@ -139,56 +150,47 @@ def _ensure_names_available(
 
 
 def _items(data: dict[str, object], key: str) -> list[dict[str, object]]:
-    value = data.get(key)
-    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise EntityDictionaryError(f"Entity Dictionary field '{key}' must be a list")
-    return value
+    return data[key]  # type: ignore[return-value]
 
 
 def _validate_dictionary(data: object) -> None:
-    if not isinstance(data, dict):
-        raise EntityDictionaryError("Entity Dictionary must be a JSON object")
-    if data.get("schema_version") != ENTITY_DICTIONARY_SCHEMA_VERSION:
-        raise EntityDictionaryError("Unsupported Entity Dictionary schema version")
+    errors = sorted(
+        _SCHEMA_VALIDATOR.iter_errors(data),
+        key=lambda error: tuple(str(part) for part in error.absolute_path),
+    )
+    if errors:
+        error = errors[0]
+        path = ".".join(str(part) for part in error.absolute_path) or "$"
+        raise EntityDictionaryError(
+            f"Entity Dictionary schema error at {path}: {error.message}"
+        )
+
+    assert isinstance(data, dict)
     entities = _items(data, "entities")
     candidates = _items(data, "candidates")
     ids: set[str] = set()
     names: dict[str, str] = {}
     for entity in entities:
         entity_id = entity.get("id")
-        if not isinstance(entity_id, str) or not entity_id or entity_id in ids:
-            raise EntityDictionaryError("Accepted entity IDs must be unique strings")
+        assert isinstance(entity_id, str)
+        if entity_id in ids:
+            raise EntityDictionaryError(f"Entity Dictionary duplicate ID: {entity_id}")
         ids.add(entity_id)
-        if entity.get("type") not in ENTITY_TYPES:
-            raise EntityDictionaryError(f"Accepted entity {entity_id} has an invalid type")
-        if entity.get("status") != "accepted":
-            raise EntityDictionaryError(f"Accepted entity {entity_id} has an invalid status")
-        if entity.get("schema_version") != ENTITY_DICTIONARY_SCHEMA_VERSION:
-            raise EntityDictionaryError(f"Accepted entity {entity_id} has an invalid schema version")
-        canonical = entity.get("canonical_name")
-        aliases = entity.get("aliases")
-        if not isinstance(canonical, str) or not canonical.strip():
-            raise EntityDictionaryError(f"Accepted entity {entity_id} needs a display name")
-        if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
-            raise EntityDictionaryError(f"Accepted entity {entity_id} aliases must be strings")
+        canonical = entity["canonical_name"]
+        aliases = entity["aliases"]
+        assert isinstance(canonical, str) and isinstance(aliases, list)
         for name in [canonical, *aliases]:
             key = name.strip().casefold()
             owner = names.get(key)
             if not key or (owner is not None and owner != entity_id):
-                raise EntityConflictError(f"Name or alias '{name}' resolves to multiple accepted entities")
+                raise EntityConflictError(
+                    f"Name or alias '{name}' resolves to multiple accepted entities"
+                )
             names[key] = entity_id
     candidate_ids: set[str] = set()
     for candidate in candidates:
         candidate_id = candidate.get("id")
-        name = candidate.get("name")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id
-            or candidate_id in candidate_ids
-        ):
-            raise EntityDictionaryError("Candidate entity IDs must be unique strings")
+        assert isinstance(candidate_id, str)
+        if candidate_id in candidate_ids or candidate_id in ids:
+            raise EntityDictionaryError(f"Entity Dictionary duplicate ID: {candidate_id}")
         candidate_ids.add(candidate_id)
-        if not isinstance(name, str) or not name.strip():
-            raise EntityDictionaryError(f"Candidate entity {candidate_id} needs a name")
-        if candidate.get("status") != "candidate":
-            raise EntityDictionaryError(f"Candidate entity {candidate_id} has an invalid status")
