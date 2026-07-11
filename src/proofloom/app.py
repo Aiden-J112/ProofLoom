@@ -6,7 +6,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, urlparse
 
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
@@ -27,24 +27,60 @@ def _page(content: str) -> bytes:
 """.encode("utf-8")
 
 
-def _home_page() -> bytes:
-    return _page("""
+def _directory_field(purpose: str, selected: str | None) -> str:
+    if selected:
+        return (
+            f'<p>Selected directory: {html.escape(selected)}</p>'
+            f'<input type="hidden" name="directory" value="{html.escape(selected)}">'
+            f'<a href="/directories?purpose={purpose}">Choose another directory</a>'
+        )
+    label = "Choose a directory" if purpose == "create" else "Choose a project directory"
+    return f'<a href="/directories?purpose={purpose}">{label}</a>'
+
+
+def _home_page(purpose: str | None = None, selected: str | None = None) -> bytes:
+    create_directory = selected if purpose == "create" else None
+    open_directory = selected if purpose == "open" else None
+    return _page(f"""
 <section>
   <h2>Create a Knowledge Project</h2>
   <form method="post" action="/projects/create">
     <label>Project name <input name="name" required></label>
-    <label>Local directory <input name="directory" required></label>
+    {_directory_field("create", create_directory)}
     <button type="submit">Create project</button>
   </form>
 </section>
 <section>
   <h2>Open a Knowledge Project</h2>
   <form method="post" action="/projects/open">
-    <label>Local directory <input name="directory" required></label>
+    {_directory_field("open", open_directory)}
     <button type="submit">Open project</button>
   </form>
 </section>
 """)
+
+
+def _directory_page(root: Path, current: Path, purpose: str) -> bytes:
+    entries = []
+    directories = (item for item in current.iterdir() if item.is_dir())
+    for path in sorted(directories, key=lambda item: item.name.lower()):
+        href = f"/directories?purpose={purpose}&path={quote(str(path))}"
+        entries.append(f'<li><a href="{html.escape(href)}">{html.escape(path.name)}</a></li>')
+
+    parent_link = ""
+    if current != root:
+        parent = quote(str(current.parent))
+        parent_link = (
+            f'<p><a href="/directories?purpose={purpose}&path={parent}">'
+            "Parent directory</a></p>"
+        )
+    selected = quote(str(current))
+    return _page(
+        "<h2>Choose a local directory</h2>"
+        f"<p>Current directory: {html.escape(str(current))}</p>"
+        f'{parent_link}<ul>{"".join(entries)}</ul>'
+        f'<a href="/?purpose={purpose}&directory={selected}">Use this directory</a>'
+    )
 
 
 def _project_page(project_path: Path, metadata: dict[str, object]) -> bytes:
@@ -64,10 +100,19 @@ def _metadata_path(project_path: Path) -> Path:
 
 class ProofLoomRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path != "/":
+        request = urlparse(self.path)
+        query = parse_qs(request.query)
+        if request.path == "/":
+            self._send_page(
+                _home_page(
+                    query.get("purpose", [None])[0],
+                    query.get("directory", [None])[0],
+                )
+            )
+        elif request.path == "/directories":
+            self._browse_directories(query)
+        else:
             self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        self._send_page(_home_page())
 
     def do_POST(self) -> None:
         form = self._read_form()
@@ -82,6 +127,18 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         values = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
         return {key: items[0] for key, items in values.items()}
+
+    def _browse_directories(self, query: dict[str, list[str]]) -> None:
+        purpose = query.get("purpose", [""])[0]
+        if purpose not in {"create", "open"}:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Unknown directory selection purpose")
+            return
+        root = self.server.browse_root
+        current = Path(query.get("path", [str(root)])[0]).expanduser().resolve()
+        if not current.is_relative_to(root) or not current.is_dir():
+            self.send_error(HTTPStatus.BAD_REQUEST, "Directory is outside the local browsing root")
+            return
+        self._send_page(_directory_page(root, current, purpose))
 
     def _create_project(self, form: dict[str, str]) -> None:
         name = form.get("name", "").strip()
@@ -106,9 +163,20 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             encoding="utf-8",
         )
         project_gitignore = project_path / ".gitignore"
-        if not project_gitignore.exists():
+        existing_rules = ""
+        if project_gitignore.exists():
+            existing_rules = project_gitignore.read_text(encoding="utf-8")
+        managed_rule = ".proofloom/"
+        if managed_rule not in existing_rules.splitlines():
+            separator = "" if not existing_rules or existing_rules.endswith("\n") else "\n"
+            comment_separator = "" if not existing_rules else "\n"
             project_gitignore.write_text(
-                "*\n!.gitignore\n",
+                existing_rules
+                + separator
+                + comment_separator
+                + "# ProofLoom managed project data\n"
+                + managed_rule
+                + "\n",
                 encoding="utf-8",
             )
         self._send_page(_project_page(project_path, metadata), HTTPStatus.CREATED)
@@ -144,8 +212,18 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         return
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), ProofLoomRequestHandler)
+class ProofLoomServer(ThreadingHTTPServer):
+    def __init__(self, address: tuple[str, int], browse_root: Path):
+        self.browse_root = browse_root.expanduser().resolve()
+        super().__init__(address, ProofLoomRequestHandler)
+
+
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    browse_root: Path | None = None,
+) -> ProofLoomServer:
+    return ProofLoomServer((host, port), browse_root or Path.home())
 
 
 def main() -> None:
