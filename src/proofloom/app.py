@@ -10,6 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from proofloom.sources import SourceImportError, import_markdown
+
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
 PROJECT_SCHEMA_VERSION = "1"
@@ -102,14 +104,85 @@ def _directory_page(root: Path, current: Path, purpose: str, csrf_token: str) ->
     )
 
 
-def _project_page(project_path: Path, metadata: dict[str, object]) -> bytes:
+def _fragments_path(project_path: Path) -> Path:
+    return project_path / METADATA_DIRECTORY / "source-fragments.json"
+
+
+def _source_page(
+    root: Path,
+    current: Path,
+    project_path: Path,
+    csrf_token: str,
+    selected: Path | None = None,
+) -> bytes:
+    project_query = quote(str(project_path))
+    entries = []
+    for path in sorted(current.iterdir(), key=lambda item: item.name.lower()):
+        if path.is_dir() or (path.is_file() and path.suffix.lower() == ".md"):
+            href = f"/sources?project={project_query}&path={quote(str(path))}"
+            if path.is_file():
+                href += "&select=file"
+            entries.append(
+                f'<li><a href="{html.escape(href)}">{html.escape(path.name)}</a></li>'
+            )
+    parent_link = ""
+    if current != root:
+        parent_link = (
+            f'<p><a href="/sources?project={project_query}&path={quote(str(current.parent))}">'
+            "Parent directory</a></p>"
+        )
+    chosen = selected or current
+    return _page(
+        "<h2>Choose UTF-8 Markdown</h2>"
+        f"<p>Current directory: {html.escape(str(current))}</p>"
+        f'{parent_link}<ul>{"".join(entries)}</ul>'
+        '<form method="post" action="/sources/import">'
+        f'{_csrf_field(csrf_token)}'
+        f'<input type="hidden" name="project" value="{html.escape(str(project_path))}">'
+        f'<input type="hidden" name="source" value="{html.escape(str(chosen))}">'
+        f'<p>Selected source: {html.escape(str(chosen))}</p>'
+        '<button type="submit">Import selected source</button></form>'
+    )
+
+
+def _project_page(
+    project_path: Path,
+    metadata: dict[str, object],
+    csrf_token: str,
+    fragments: list[dict[str, object]] | None = None,
+) -> bytes:
     project = metadata["project"]
     assert isinstance(project, dict)
+    if fragments is None:
+        try:
+            loaded = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
+            fragments = loaded if isinstance(loaded, list) else []
+        except (OSError, json.JSONDecodeError):
+            fragments = []
+    fragment_items = "".join(
+        "<article>"
+        f"<h4>{html.escape(str(fragment['id']))}</h4>"
+        f"<p>{html.escape(str(fragment['source_file']))} — "
+        f"{html.escape(' / '.join(str(part) for part in fragment['heading_path']))}</p>"
+        f"<p>Ordinal: {fragment['ordinal']} · Kind: {html.escape(str(fragment['kind']))}</p>"
+        f"<pre>{html.escape(str(fragment['content']))}</pre>"
+        "</article>"
+        for fragment in fragments
+    )
     return _page(
         "<h2>Knowledge Project</h2>"
         f"<p>Name: {html.escape(str(project['name']))}</p>"
         f"<p>Directory: {html.escape(str(project_path))}</p>"
         f"<p>Schema version: {html.escape(str(metadata['schema_version']))}</p>"
+        "<h3>Import Markdown</h3>"
+        '<form method="post" action="/sources/import">'
+        f'{_csrf_field(csrf_token)}'
+        f'<input type="hidden" name="project" value="{html.escape(str(project_path))}">'
+        '<label>UTF-8 Markdown file or directory '
+        '<input name="source" required></label>'
+        '<button type="submit">Import</button></form>'
+        f'<p><a href="/sources?project={quote(str(project_path))}">Choose Markdown source</a></p>'
+        f"<h3>Source Fragments</h3>{fragment_items or '<p>No Source Fragments imported.</p>'}"
     )
 
 
@@ -131,6 +204,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             )
         elif request.path == "/directories":
             self._browse_directories(query)
+        elif request.path == "/sources":
+            self._browse_sources(query)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -147,6 +222,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._open_project(form)
         elif self.path == "/directories/create":
             self._create_directory(form)
+        elif self.path == "/sources/import":
+            self._import_sources(form)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -174,6 +251,33 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         if not path.is_relative_to(self.server.browse_root):
             raise ValueError("Directory is outside the local browsing root")
         return path
+
+    def _browse_sources(self, query: dict[str, list[str]]) -> None:
+        try:
+            project_path = self._local_path(query.get("project", [""])[0])
+            if not _metadata_path(project_path).is_file():
+                raise ValueError("Knowledge Project does not exist")
+            chosen = self._local_path(
+                query.get("path", [str(self.server.browse_root)])[0]
+            )
+            selected = chosen if query.get("select", [""])[0] == "file" else None
+            current = chosen.parent if selected else chosen
+            if selected and selected.suffix.lower() != ".md":
+                raise ValueError("Select a Markdown (.md) file")
+            if not current.is_dir():
+                raise ValueError("Source directory does not exist")
+        except ValueError as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(
+            _source_page(
+                self.server.browse_root,
+                current,
+                project_path,
+                self.server.csrf_token,
+                selected,
+            )
+        )
 
     def _create_directory(self, form: dict[str, str]) -> None:
         purpose = form.get("purpose", "")
@@ -244,7 +348,10 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
                 + "\n",
                 encoding="utf-8",
             )
-        self._send_page(_project_page(project_path, metadata), HTTPStatus.CREATED)
+        self._send_page(
+            _project_page(project_path, metadata, self.server.csrf_token),
+            HTTPStatus.CREATED,
+        )
 
     def _open_project(self, form: dict[str, str]) -> None:
         directory = form.get("directory", "").strip()
@@ -268,7 +375,26 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
 
-        self._send_page(_project_page(project_path, metadata))
+        self._send_page(_project_page(project_path, metadata, self.server.csrf_token))
+
+    def _import_sources(self, form: dict[str, str]) -> None:
+        try:
+            project_path = self._local_path(form.get("project", ""))
+            source_path = self._local_path(form.get("source", ""))
+            metadata = json.loads(_metadata_path(project_path).read_text(encoding="utf-8"))
+            if metadata.get("schema_version") != PROJECT_SCHEMA_VERSION:
+                raise ValueError("Unsupported project schema version")
+            fragments = import_markdown(source_path)
+            _fragments_path(project_path).write_text(
+                json.dumps(fragments, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except (OSError, json.JSONDecodeError, SourceImportError, ValueError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(
+            _project_page(project_path, metadata, self.server.csrf_token, fragments)
+        )
 
     def _send_page(self, body: bytes, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
