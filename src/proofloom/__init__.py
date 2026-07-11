@@ -1,2 +1,1 @@
 """ProofLoom local application."""
-

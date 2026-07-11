@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
 import json
+import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +29,10 @@ def _page(content: str) -> bytes:
 """.encode("utf-8")
 
 
+def _csrf_field(token: str) -> str:
+    return f'<input type="hidden" name="csrf_token" value="{html.escape(token)}">'
+
+
 def _directory_field(purpose: str, selected: str | None) -> str:
     if selected:
         return (
@@ -38,13 +44,18 @@ def _directory_field(purpose: str, selected: str | None) -> str:
     return f'<a href="/directories?purpose={purpose}">{label}</a>'
 
 
-def _home_page(purpose: str | None = None, selected: str | None = None) -> bytes:
+def _home_page(
+    csrf_token: str,
+    purpose: str | None = None,
+    selected: str | None = None,
+) -> bytes:
     create_directory = selected if purpose == "create" else None
     open_directory = selected if purpose == "open" else None
     return _page(f"""
 <section>
   <h2>Create a Knowledge Project</h2>
   <form method="post" action="/projects/create">
+    {_csrf_field(csrf_token)}
     <label>Project name <input name="name" required></label>
     {_directory_field("create", create_directory)}
     <button type="submit">Create project</button>
@@ -53,6 +64,7 @@ def _home_page(purpose: str | None = None, selected: str | None = None) -> bytes
 <section>
   <h2>Open a Knowledge Project</h2>
   <form method="post" action="/projects/open">
+    {_csrf_field(csrf_token)}
     {_directory_field("open", open_directory)}
     <button type="submit">Open project</button>
   </form>
@@ -60,7 +72,7 @@ def _home_page(purpose: str | None = None, selected: str | None = None) -> bytes
 """)
 
 
-def _directory_page(root: Path, current: Path, purpose: str) -> bytes:
+def _directory_page(root: Path, current: Path, purpose: str, csrf_token: str) -> bytes:
     entries = []
     directories = (item for item in current.iterdir() if item.is_dir())
     for path in sorted(directories, key=lambda item: item.name.lower()):
@@ -80,6 +92,13 @@ def _directory_page(root: Path, current: Path, purpose: str) -> bytes:
         f"<p>Current directory: {html.escape(str(current))}</p>"
         f'{parent_link}<ul>{"".join(entries)}</ul>'
         f'<a href="/?purpose={purpose}&directory={selected}">Use this directory</a>'
+        '<h3>Create a new directory here</h3>'
+        '<form method="post" action="/directories/create">'
+        f'{_csrf_field(csrf_token)}'
+        f'<input type="hidden" name="parent" value="{html.escape(str(current))}">'
+        f'<input type="hidden" name="purpose" value="{purpose}">'
+        '<label>Directory name <input name="name" required></label>'
+        '<button type="submit">Create and select</button></form>'
     )
 
 
@@ -105,6 +124,7 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         if request.path == "/":
             self._send_page(
                 _home_page(
+                    self.server.csrf_token,
                     query.get("purpose", [None])[0],
                     query.get("directory", [None])[0],
                 )
@@ -116,10 +136,17 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         form = self._read_form()
-        if self.path == "/projects/create":
+        if not secrets.compare_digest(
+            form.get("csrf_token", ""),
+            self.server.csrf_token,
+        ):
+            self.send_error(HTTPStatus.FORBIDDEN, "Invalid CSRF token")
+        elif self.path == "/projects/create":
             self._create_project(form)
         elif self.path == "/projects/open":
             self._open_project(form)
+        elif self.path == "/directories/create":
+            self._create_directory(form)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -138,7 +165,41 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         if not current.is_relative_to(root) or not current.is_dir():
             self.send_error(HTTPStatus.BAD_REQUEST, "Directory is outside the local browsing root")
             return
-        self._send_page(_directory_page(root, current, purpose))
+        self._send_page(
+            _directory_page(root, current, purpose, self.server.csrf_token)
+        )
+
+    def _local_path(self, raw_path: str) -> Path:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_relative_to(self.server.browse_root):
+            raise ValueError("Directory is outside the local browsing root")
+        return path
+
+    def _create_directory(self, form: dict[str, str]) -> None:
+        purpose = form.get("purpose", "")
+        name = form.get("name", "").strip()
+        if purpose not in {"create", "open"}:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Unknown directory selection purpose")
+            return
+        if (
+            not name
+            or name in {".", ".."}
+            or Path(name).name != name
+            or "/" in name
+            or "\\" in name
+        ):
+            self.send_error(HTTPStatus.BAD_REQUEST, "Use a single directory name")
+            return
+        try:
+            parent = self._local_path(form.get("parent", ""))
+            if not parent.is_dir():
+                raise ValueError("Parent directory does not exist")
+            created = parent / name
+            created.mkdir()
+        except (OSError, ValueError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(_home_page(self.server.csrf_token, purpose, str(created)))
 
     def _create_project(self, form: dict[str, str]) -> None:
         name = form.get("name", "").strip()
@@ -147,7 +208,11 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Project name and directory are required")
             return
 
-        project_path = Path(directory).expanduser().resolve()
+        try:
+            project_path = self._local_path(directory)
+        except ValueError as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
         metadata_path = _metadata_path(project_path)
         if metadata_path.exists():
             self.send_error(HTTPStatus.CONFLICT, "A Knowledge Project already exists there")
@@ -187,7 +252,11 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Project directory is required")
             return
 
-        project_path = Path(directory).expanduser().resolve()
+        try:
+            project_path = self._local_path(directory)
+        except ValueError as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
         metadata_path = _metadata_path(project_path)
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -215,6 +284,7 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
 class ProofLoomServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], browse_root: Path):
         self.browse_root = browse_root.expanduser().resolve()
+        self.csrf_token = secrets.token_urlsafe(32)
         super().__init__(address, ProofLoomRequestHandler)
 
 
@@ -223,6 +293,8 @@ def create_server(
     port: int = 8000,
     browse_root: Path | None = None,
 ) -> ProofLoomServer:
+    if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
+        raise ValueError("ProofLoom may only bind to a loopback address")
     return ProofLoomServer((host, port), browse_root or Path.home())
 
 
@@ -230,8 +302,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local ProofLoom interface")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--browse-root", type=Path, default=Path.home())
     args = parser.parse_args()
-    server = create_server(args.host, args.port)
+    server = create_server(args.host, args.port, browse_root=args.browse_root)
     print(f"ProofLoom is available at http://{args.host}:{server.server_port}")
     try:
         server.serve_forever()

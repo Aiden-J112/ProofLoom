@@ -13,4 +13,3 @@ proofloom = "proofloom.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
