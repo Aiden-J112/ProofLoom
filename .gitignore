@@ -1,0 +1,9 @@
+# Reference project downloaded for local comparison only.
+llm_wiki-main/
+
+# Local Codex instructions; keep them out of the public repository.
+AGENTS.md
+
+# Local discussion notes and agent records.
+docs/
+CONTEXT.md
