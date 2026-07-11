@@ -16,4 +16,4 @@ proofloom = "proofloom.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-proofloom = ["schemas/*.json"]
+proofloom = ["schemas/*.json", "fixtures/*.json"]

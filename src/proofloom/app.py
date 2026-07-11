@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from proofloom.assertions import FixtureExtractor, validate_candidates, write_extraction_results
 from proofloom.entities import (
     ENTITY_TYPES,
     EntityConflictError,
@@ -126,6 +127,64 @@ def _fragments_path(project_path: Path) -> Path:
 
 def _entities_path(project_path: Path) -> Path:
     return project_path / METADATA_DIRECTORY / "entity-dictionary.json"
+
+
+def _assertions_path(project_path: Path) -> Path:
+    return project_path / METADATA_DIRECTORY / "candidate-assertions.json"
+
+
+def _validation_path(project_path: Path) -> Path:
+    return project_path / METADATA_DIRECTORY / "assertion-validation.json"
+
+
+def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
+    def load(path: Path, default):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default
+    candidates = load(_assertions_path(project_path), [])
+    validation = load(_validation_path(project_path), [])
+    fragments = load(_fragments_path(project_path), [])
+    fragment_by_id = {item.get("id"): item for item in fragments if isinstance(item, dict)}
+    cards = []
+    for candidate in candidates:
+        evidence_ids = [candidate["primary_evidence_id"], *candidate["supporting_evidence_ids"]]
+        evidence = []
+        for evidence_id in evidence_ids:
+            fragment = fragment_by_id.get(evidence_id, {})
+            evidence.append(
+                f"<li>{html.escape(str(evidence_id))}: {html.escape(str(fragment.get('source_file', 'missing')))} — "
+                f"{html.escape(' / '.join(map(str, fragment.get('heading_path', []))))}<pre>{html.escape(str(fragment.get('content', '')))}</pre></li>"
+            )
+        extraction = candidate["extraction"]
+        cards.append(
+            "<article>"
+            f"<h3>{html.escape(str(candidate['id']))}</h3>"
+            f"<p>{html.escape(str(candidate['subject_id']))} — {html.escape(str(candidate['predicate']))} → {html.escape(str(candidate['object_id']))}</p>"
+            f"<p>provider={html.escape(str(extraction['provider']))}; model={html.escape(str(extraction['model']))}; prompt_version={html.escape(str(extraction['prompt_version']))}; schema_version={html.escape(str(extraction['schema_version']))}; generated_at={html.escape(str(extraction['generated_at']))}; mode={html.escape(str(extraction['mode']))}</p>"
+            f"<h4>Evidence References</h4><ul>{''.join(evidence)}</ul></article>"
+        )
+    validation_items = []
+    for item in validation:
+        outcome = "valid"
+        if not item.get("valid"):
+            outcome = "; ".join(
+                f"{reason['field']}: {reason['reason']}"
+                for reason in item.get("reasons", [])
+            )
+        validation_items.append(
+            f"<li>{html.escape(str(item.get('candidate_id')))}: {html.escape(outcome)}</li>"
+        )
+    validation_html = "".join(validation_items)
+    return _page(
+        "<h2>Candidate Assertions</h2>"
+        '<form method="post" action="/assertions/extract-fixture">'
+        f"{_csrf_field(csrf_token)}<input type=\"hidden\" name=\"project\" value=\"{html.escape(str(project_path))}\">"
+        "<button type=\"submit\">Run offline synthetic fixture extraction</button></form>"
+        f"{''.join(cards) or '<p>No valid Candidate Assertions.</p>'}"
+        f"<h2>Validation output</h2><ul>{validation_html or '<li>Not run.</li>'}</ul>"
+    )
 
 
 def _entity_dictionary_page(
@@ -245,6 +304,7 @@ def _project_page(
         '<button type="submit">Import</button></form>'
         f'<p><a href="/sources?project={quote(str(project_path))}">Choose Markdown source</a></p>'
         f'<p><a href="/entities?project={quote(str(project_path))}">Review Entity Dictionary</a></p>'
+        f'<p><a href="/assertions?project={quote(str(project_path))}">Extract Candidate Assertions</a></p>'
         f"<h3>Source Fragments</h3>{fragment_items or '<p>No Source Fragments imported.</p>'}"
     )
 
@@ -271,6 +331,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._browse_sources(query)
         elif request.path == "/entities":
             self._show_entities(query)
+        elif request.path == "/assertions":
+            self._show_assertions(query)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -295,6 +357,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._accept_entity(form)
         elif self.path == "/entities/update":
             self._update_entity(form)
+        elif self.path == "/assertions/extract-fixture":
+            self._extract_fixture(form)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -364,6 +428,39 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
         self._send_page(_entity_dictionary_page(project_path, dictionary, self.server.csrf_token))
+
+    def _show_assertions(self, query: dict[str, list[str]]) -> None:
+        try:
+            project_path = self._entity_project(query.get("project", [""])[0])
+        except (ValueError, EntityDictionaryError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
+        self._send_page(_assertion_page(project_path, self.server.csrf_token))
+
+    def _extract_fixture(self, form: dict[str, str]) -> None:
+        try:
+            project_path = self._entity_project(form.get("project", ""))
+            dictionary = load_dictionary(_entities_path(project_path))
+            fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
+            if not isinstance(fragments, list):
+                raise ValueError("Stored Source Fragments must be a list")
+            candidates = self.server.fixture_extractor.extract(dictionary, fragments)
+            validation = validate_candidates(candidates, dictionary, fragments)
+            valid_indices = {
+                item["candidate_index"] for item in validation if item["valid"]
+            }
+            valid_candidates = [
+                item for index, item in enumerate(candidates) if index in valid_indices
+            ]
+            with self.server.assertion_lock:
+                write_extraction_results(
+                    _validation_path(project_path),
+                    _assertions_path(project_path),
+                    validation,
+                    valid_candidates,
+                )
+        except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
+        self._send_page(_assertion_page(project_path, self.server.csrf_token))
 
     def _mutate_dictionary(self, form: dict[str, str], operation) -> None:
         try:
@@ -550,6 +647,8 @@ class ProofLoomServer(ThreadingHTTPServer):
         self.browse_root = browse_root.expanduser().resolve()
         self.csrf_token = secrets.token_urlsafe(32)
         self.entity_dictionary_lock = threading.Lock()
+        self.assertion_lock = threading.Lock()
+        self.fixture_extractor = FixtureExtractor()
         super().__init__(address, ProofLoomRequestHandler)
 
 
