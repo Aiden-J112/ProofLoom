@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -9,6 +11,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib import error, request
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, FormatChecker
 
@@ -35,21 +38,41 @@ class ExtractionError(ValueError):
 
 
 class Extractor(Protocol):
-    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[dict[str, object]]: ...
+    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[object]: ...
+
+
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _default_transport(http_request: request.Request, timeout: float) -> bytes:
-    with request.urlopen(http_request, timeout=timeout) as response:
+    opener = request.build_opener(_NoRedirectHandler())
+    with opener.open(http_request, timeout=timeout) as response:
         return response.read()
 
 
 class OpenAICompatibleExtractor:
     """Candidate-only adapter for OpenAI-compatible chat completions APIs."""
 
-    def __init__(self, base_url: str, model: str, api_key: str, provider: str = "openai", *, timeout: float = 30.0, transport: Callable[[request.Request, float], bytes] = _default_transport, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
-        if not all(isinstance(value, str) and value.strip() for value in (base_url, model, api_key, provider)):
-            raise ExtractionError("base URL, model, API key, and provider must be non-empty")
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, endpoint: str, model: str, api_key: str, provider: str = "openai", *, timeout: float = 30.0, transport: Callable[[request.Request, float], bytes] = _default_transport, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        if not all(isinstance(value, str) and value.strip() for value in (endpoint, model, api_key, provider)):
+            raise ExtractionError("endpoint, model, API key, and provider must be non-empty")
+        parsed = urlsplit(endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ExtractionError("endpoint must be an absolute HTTP(S) URL with a host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ExtractionError("endpoint must not contain user information")
+        if parsed.scheme == "http":
+            try:
+                local = ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                local = parsed.hostname.casefold() == "localhost"
+            if not local:
+                raise ExtractionError("HTTP endpoints are allowed only for localhost or loopback providers")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ExtractionError("timeout must be a positive finite number")
+        self.endpoint = endpoint
         self.model = model
         self.provider = provider
         self._api_key = api_key
@@ -60,17 +83,20 @@ class OpenAICompatibleExtractor:
     @classmethod
     def from_environment(cls, **overrides):
         values = {
-            "base_url": os.environ.get("PROOFLOOM_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            "endpoint": os.environ.get("PROOFLOOM_OPENAI_ENDPOINT", ""),
             "model": os.environ.get("PROOFLOOM_OPENAI_MODEL", ""),
             "api_key": os.environ.get("PROOFLOOM_OPENAI_API_KEY", ""),
             "provider": os.environ.get("PROOFLOOM_OPENAI_PROVIDER", "openai"),
         }
+        if not values["endpoint"]:
+            base_url = os.environ.get("PROOFLOOM_OPENAI_BASE_URL")
+            values["endpoint"] = f"{base_url.rstrip('/')}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
         missing = [name for name, key in (("PROOFLOOM_OPENAI_MODEL", "model"), ("PROOFLOOM_OPENAI_API_KEY", "api_key")) if not values[key]]
         if missing:
             raise ExtractionError(f"Missing environment configuration: {', '.join(missing)}")
         return cls(**values, **overrides)
 
-    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[dict[str, object]]:
+    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[object]:
         payload = {
             "model": self.model,
             "messages": [
@@ -80,7 +106,7 @@ class OpenAICompatibleExtractor:
             "response_format": {"type": "json_object"},
         }
         http_request = request.Request(
-            f"{self.base_url}/chat/completions",
+            self.endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
             method="POST",
@@ -88,7 +114,9 @@ class OpenAICompatibleExtractor:
         try:
             raw = self._transport(http_request, self._timeout)
         except error.HTTPError as failure:
-            raise ExtractionError(f"OpenAI-compatible endpoint returned HTTP status {failure.code}") from None
+            status = failure.code
+            failure.close()
+            raise ExtractionError(f"OpenAI-compatible endpoint returned HTTP status {status}") from None
         except (error.URLError, TimeoutError, OSError) as failure:
             raise ExtractionError(f"OpenAI-compatible endpoint request failed: {type(failure).__name__}") from None
         try:
@@ -108,12 +136,9 @@ class OpenAICompatibleExtractor:
         items = output.get("candidates") if isinstance(output, dict) else None
         if not isinstance(items, list):
             raise ExtractionError("Model response field candidates must be an array")
-        allowed = {"id", "subject_id", "predicate", "object_id", "primary_evidence_id", "supporting_evidence_ids"}
-        if any(not isinstance(item, dict) or set(item) - allowed for item in items):
-            raise ExtractionError("Model candidates contain unsupported fields")
         generated_at = self._clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         provenance = {"provider": self.provider, "model": self.model, "prompt_version": PROMPT_VERSION, "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "api"}
-        return [dict(item, status="candidate", extraction=dict(provenance)) for item in items]
+        return [dict(item, status="candidate", extraction=dict(provenance)) if isinstance(item, dict) else item for item in items]
 
 
 def _utc_now() -> datetime:
@@ -184,6 +209,9 @@ def validate_candidates(candidates: object, dictionary: object, fragments: objec
             field = ".".join(map(str, error.absolute_path)) or "$"
             reasons.append({"field": field, "reason": error.message, "rule": "schema"})
         if isinstance(candidate, dict):
+            extraction = candidate.get("extraction")
+            if candidate.get("replaces_assertion_id") is not None and isinstance(extraction, dict) and extraction.get("mode") == "api":
+                reasons.append({"field": "replaces_assertion_id", "reason": "API extraction cannot create replacement lineage; replacements require a Review Event", "rule": "reserved"})
             subject = entities.get(str(candidate.get("subject_id", "")))
             obj = entities.get(str(candidate.get("object_id", "")))
             if subject is None:
