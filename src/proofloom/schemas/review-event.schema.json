@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofloom.local/schemas/review-event.schema.json",
+  "title": "Review Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "assertion_id", "action", "reviewer", "reviewed_at", "replacement_assertion_id", "note", "schema_version"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^rev_[0-9a-f]{32}$"},
+    "assertion_id": {"type": "string", "minLength": 1},
+    "action": {"enum": ["accept", "reject", "replace", "needs_domain_review"]},
+    "reviewer": {"const": "local-user"},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "replacement_assertion_id": {"type": ["string", "null"]},
+    "note": {"type": ["string", "null"]},
+    "schema_version": {"const": "1"}
+  }
+}

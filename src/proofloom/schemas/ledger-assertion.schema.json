@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofloom.local/schemas/ledger-assertion.schema.json",
+  "title": "Replacement Ledger Assertion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "subject_id", "predicate", "object_id", "primary_evidence_id", "supporting_evidence_ids", "status", "extraction", "replaces_assertion_id"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "subject_id": {"type": "string", "minLength": 1},
+    "predicate": {"enum": ["COMPOSED_OF", "PROMPTS", "CALLS_TOOL", "PRODUCES", "VERIFIES", "BLOCKS"]},
+    "object_id": {"type": "string", "minLength": 1},
+    "primary_evidence_id": {"type": "string", "minLength": 1},
+    "supporting_evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "status": {"const": "candidate"},
+    "replaces_assertion_id": {"type": "string", "minLength": 1},
+    "extraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "prompt_version", "schema_version", "generated_at", "mode"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "prompt_version": {"type": "string", "minLength": 1},
+        "schema_version": {"const": "1"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "mode": {"enum": ["fixture", "api"]}
+      }
+    }
+  }
+}
