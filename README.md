@@ -271,3 +271,19 @@ Explore（轻量交付）
 ### 12.1 开源资料边界
 
 当前 Harness 教程来自另一个 GitHub 开源项目，但本地教程目录中未发现明确的 `LICENSE`、`COPYING` 或 `NOTICE` 文件，README 也未声明内容再发布许可。因此已确定：开源仓库只发布程序、Schema、提示词和原创或合成的测试 fixture；不提交完整 Harness 教程、教程原文片段或从原文直接派生的可替代内容。完整教程仅作为内部 Demo 和用户本地运行时的外部输入。
+# Configured API extraction
+
+The local Candidate Assertion page can run either the bundled offline fixture or an
+OpenAI-compatible API. API configuration is read only from the process environment:
+
+- `PROOFLOOM_OPENAI_API_KEY` (required)
+- `PROOFLOOM_OPENAI_MODEL` (required)
+- `PROOFLOOM_OPENAI_BASE_URL` (optional; defaults to `https://api.openai.com/v1`)
+- `PROOFLOOM_OPENAI_PROVIDER` (optional provenance label; defaults to `openai`)
+
+`PROOFLOOM_OPENAI_BASE_URL` is a base URL, not a complete endpoint. ProofLoom appends
+`/chat/completions`. For example, `https://api.openai.com/v1` calls
+`https://api.openai.com/v1/chat/completions`. Compatible providers can be selected by
+changing these environment values; the extraction and validation workflow is unchanged.
+The API key is sent only in the `Authorization` request header and is not stored in a
+Knowledge Project or rendered in the UI.

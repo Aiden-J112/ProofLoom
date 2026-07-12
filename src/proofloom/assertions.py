@@ -7,7 +7,8 @@ import tempfile
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
+from urllib import error, request
 
 from jsonschema import Draft202012Validator, FormatChecker
 
@@ -25,6 +26,94 @@ TYPE_CONTRACTS = {
     "VERIFIES": {("Component", "Artifact")},
     "BLOCKS": {("Component", "Artifact")},
 }
+
+PROMPT_VERSION = "1"
+
+
+class ExtractionError(ValueError):
+    """A safe, user-facing extraction adapter failure."""
+
+
+class Extractor(Protocol):
+    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[dict[str, object]]: ...
+
+
+def _default_transport(http_request: request.Request, timeout: float) -> bytes:
+    with request.urlopen(http_request, timeout=timeout) as response:
+        return response.read()
+
+
+class OpenAICompatibleExtractor:
+    """Candidate-only adapter for OpenAI-compatible chat completions APIs."""
+
+    def __init__(self, base_url: str, model: str, api_key: str, provider: str = "openai", *, timeout: float = 30.0, transport: Callable[[request.Request, float], bytes] = _default_transport, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        if not all(isinstance(value, str) and value.strip() for value in (base_url, model, api_key, provider)):
+            raise ExtractionError("base URL, model, API key, and provider must be non-empty")
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.provider = provider
+        self._api_key = api_key
+        self._timeout = timeout
+        self._transport = transport
+        self._clock = clock
+
+    @classmethod
+    def from_environment(cls, **overrides):
+        values = {
+            "base_url": os.environ.get("PROOFLOOM_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            "model": os.environ.get("PROOFLOOM_OPENAI_MODEL", ""),
+            "api_key": os.environ.get("PROOFLOOM_OPENAI_API_KEY", ""),
+            "provider": os.environ.get("PROOFLOOM_OPENAI_PROVIDER", "openai"),
+        }
+        missing = [name for name, key in (("PROOFLOOM_OPENAI_MODEL", "model"), ("PROOFLOOM_OPENAI_API_KEY", "api_key")) if not values[key]]
+        if missing:
+            raise ExtractionError(f"Missing environment configuration: {', '.join(missing)}")
+        return cls(**values, **overrides)
+
+    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[dict[str, object]]:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "Return JSON only: an object with a candidates array. Each candidate must contain only id, subject_id, predicate, object_id, primary_evidence_id, and supporting_evidence_ids. Propose candidates only; never accepted knowledge."},
+                {"role": "user", "content": json.dumps({"entity_dictionary": dictionary, "source_fragments": fragments}, ensure_ascii=False)},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        http_request = request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            raw = self._transport(http_request, self._timeout)
+        except error.HTTPError as failure:
+            raise ExtractionError(f"OpenAI-compatible endpoint returned HTTP status {failure.code}") from None
+        except (error.URLError, TimeoutError, OSError) as failure:
+            raise ExtractionError(f"OpenAI-compatible endpoint request failed: {type(failure).__name__}") from None
+        try:
+            envelope = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            raise ExtractionError("OpenAI-compatible response JSON is invalid") from None
+        try:
+            content = envelope["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise ExtractionError("OpenAI-compatible response is missing choices.0.message.content") from None
+        if not isinstance(content, str):
+            raise ExtractionError("OpenAI-compatible response field choices.0.message.content must be a string")
+        try:
+            output = json.loads(content)
+        except json.JSONDecodeError:
+            raise ExtractionError("Model content is not valid response JSON") from None
+        items = output.get("candidates") if isinstance(output, dict) else None
+        if not isinstance(items, list):
+            raise ExtractionError("Model response field candidates must be an array")
+        allowed = {"id", "subject_id", "predicate", "object_id", "primary_evidence_id", "supporting_evidence_ids"}
+        if any(not isinstance(item, dict) or set(item) - allowed for item in items):
+            raise ExtractionError("Model candidates contain unsupported fields")
+        generated_at = self._clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        provenance = {"provider": self.provider, "model": self.model, "prompt_version": PROMPT_VERSION, "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "api"}
+        return [dict(item, status="candidate", extraction=dict(provenance)) for item in items]
 
 
 def _utc_now() -> datetime:

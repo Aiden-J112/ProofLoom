@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from proofloom.assertions import FixtureExtractor, validate_candidates, write_extraction_results
+from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, validate_candidates, write_extraction_results
 from proofloom.entities import (
     ENTITY_TYPES,
     EntityConflictError,
@@ -179,7 +179,8 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
     for item in validation:
         outcome = "valid" if item.get("valid") else "; ".join(f"{reason['field']}: {reason['reason']}" for reason in item.get("reasons", []))
         validation_items.append(f"<li>{html.escape(str(item.get('candidate_id')))}: {html.escape(outcome)}</li>")
-    return _page("<h2>Candidate Assertions</h2>" '<form method="post" action="/assertions/extract-fixture">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{html.escape(str(project_path))}"><button type="submit">Run offline synthetic fixture extraction</button></form>' f"{''.join(cards) or '<p>No valid Candidate Assertions.</p>'}" f"<h2>Validation output</h2><ul>{''.join(validation_items) or '<li>Not run.</li>'}</ul>")
+    project = html.escape(str(project_path))
+    return _page("<h2>Candidate Assertions</h2>" '<form method="post" action="/assertions/extract-fixture">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run offline synthetic fixture extraction</button></form>' '<form method="post" action="/assertions/extract-api">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run configured API extraction</button></form>' f"{''.join(cards) or '<p>No valid Candidate Assertions.</p>'}" f"<h2>Validation output</h2><ul>{''.join(validation_items) or '<li>Not run.</li>'}</ul>")
 
 
 def _entity_dictionary_page(
@@ -353,7 +354,13 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         elif self.path == "/entities/update":
             self._update_entity(form)
         elif self.path == "/assertions/extract-fixture":
-            self._extract_fixture(form)
+            self._extract(form, self.server.fixture_extractor)
+        elif self.path == "/assertions/extract-api":
+            try:
+                extractor = self.server.api_extractor or OpenAICompatibleExtractor.from_environment()
+            except ExtractionError as error:
+                self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
+            self._extract(form, extractor)
         elif self.path == "/assertions/review":
             self._review_assertion(form)
         else:
@@ -433,14 +440,14 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
         self._send_page(_assertion_page(project_path, self.server.csrf_token))
 
-    def _extract_fixture(self, form: dict[str, str]) -> None:
+    def _extract(self, form: dict[str, str], extractor) -> None:
         try:
             project_path = self._entity_project(form.get("project", ""))
             dictionary = load_dictionary(_entities_path(project_path))
             fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
             if not isinstance(fragments, list):
                 raise ValueError("Stored Source Fragments must be a list")
-            candidates = self.server.fixture_extractor.extract(dictionary, fragments)
+            candidates = extractor.extract(dictionary, fragments)
             validation = validate_candidates(candidates, dictionary, fragments)
             valid_indices = {
                 item["candidate_index"] for item in validation if item["valid"]
@@ -463,7 +470,7 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
                     validation,
                     valid_candidates,
                 )
-        except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError) as error:
+        except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError, ExtractionError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
         self._send_page(_assertion_page(project_path, self.server.csrf_token))
 
@@ -673,6 +680,7 @@ class ProofLoomServer(ThreadingHTTPServer):
         self.entity_dictionary_lock = threading.Lock()
         self.assertion_lock = threading.Lock()
         self.fixture_extractor = FixtureExtractor()
+        self.api_extractor = None
         super().__init__(address, ProofLoomRequestHandler)
 
 
