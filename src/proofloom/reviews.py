@@ -11,13 +11,17 @@ from pathlib import Path
 from typing import Callable
 
 from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from proofloom.assertions import validate_candidates
 
 SCHEMA_VERSION = "1"
 _EVENT_SCHEMA = json.loads(files("proofloom").joinpath("schemas/review-event.schema.json").read_text(encoding="utf-8"))
+_CANDIDATE_SCHEMA = json.loads(files("proofloom").joinpath("schemas/candidate-assertion.schema.json").read_text(encoding="utf-8"))
+_SCHEMA_REGISTRY = Registry().with_resource(_CANDIDATE_SCHEMA["$id"], Resource.from_contents(_CANDIDATE_SCHEMA))
 Draft202012Validator.check_schema(_EVENT_SCHEMA)
-_EVENT_VALIDATOR = Draft202012Validator(_EVENT_SCHEMA, format_checker=FormatChecker())
+Draft202012Validator.check_schema(_CANDIDATE_SCHEMA)
+_EVENT_VALIDATOR = Draft202012Validator(_EVENT_SCHEMA, registry=_SCHEMA_REGISTRY, format_checker=FormatChecker())
 _EVENT_FILENAME = re.compile(r"^(?P<sequence>[0-9]{20})\.json$")
 
 
@@ -42,6 +46,8 @@ def _validate_event(event: dict[str, object]) -> None:
     replacement_id = event.get("replacement_assertion_id")
     if isinstance(replacement, dict) and replacement.get("id") != replacement_id:
         raise ReviewError("replacement_assertion_id: must equal replacement_assertion.id")
+    if isinstance(replacement, dict) and replacement.get("replaces_assertion_id") != event.get("assertion_id"):
+        raise ReviewError("replacement_assertion.replaces_assertion_id: must equal assertion_id")
 
 
 def load_events(directory: Path) -> list[dict[str, object]]:
@@ -85,11 +91,20 @@ def fold_status(assertion_id: str, events: list[dict[str, object]]) -> str:
     return status
 
 
-def append_event(directory: Path, event: dict[str, object]) -> dict[str, object]:
+def append_event(
+    directory: Path,
+    event: dict[str, object],
+    expected_prior_sequence: int | None = None,
+) -> dict[str, object]:
     directory.mkdir(parents=True, exist_ok=True)
     while True:
         existing = load_events(directory)
-        sequence = (int(existing[-1]["sequence"]) if existing else 0) + 1
+        current_sequence = int(existing[-1]["sequence"]) if existing else 0
+        if expected_prior_sequence is not None and current_sequence != expected_prior_sequence:
+            raise ReviewConflict(
+                f"sequence: expected prior sequence {expected_prior_sequence}, found {current_sequence}"
+            )
+        sequence = current_sequence + 1
         persisted = dict(event, sequence=sequence)
         _validate_event(persisted)
         destination = directory / f"{sequence:020d}.json"
@@ -128,10 +143,15 @@ def review(
     if action not in {"accept", "reject", "replace", "needs_domain_review"}:
         raise ReviewError("action: choose accept, reject, replace, or needs_domain_review")
     events = load_events(events_directory)
+    expected_prior_sequence = int(events[-1]["sequence"]) if events else 0
     assertions = [*candidates, *replacement_assertions(events)]
     original = next((item for item in assertions if item.get("id") == assertion_id), None)
     if original is None:
         raise ReviewError("assertion_id: Candidate Assertion does not exist")
+    if original.get("replaces_assertion_id") is not None:
+        validation = validate_candidates([original], dictionary, fragments)[0]
+        if not validation["valid"]:
+            raise ReviewError("; ".join(f"replacement_assertion.{item['field']}: {item['reason']}" for item in validation["reasons"]))
     if any(event.get("assertion_id") == assertion_id and event.get("action") == "replace" for event in events):
         raise ReviewConflict("assertion_id: replaced assertion is terminal")
     replacement = None
@@ -146,9 +166,7 @@ def review(
         replacement.update(semantic)
         replacement["id"] = f"ast_replacement_{uuid.uuid4().hex}"
         replacement["replaces_assertion_id"] = assertion_id
-        validation_input = dict(replacement)
-        validation_input.pop("replaces_assertion_id")
-        result = validate_candidates([validation_input], dictionary, fragments)[0]
+        result = validate_candidates([replacement], dictionary, fragments)[0]
         if not result["valid"]:
             raise ReviewError("; ".join(f"replacement_assertion.{item['field']}: {item['reason']}" for item in result["reasons"]))
     now = clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -159,4 +177,8 @@ def review(
         "replacement_assertion": replacement,
         "note": note.strip() if note and note.strip() else None, "schema_version": SCHEMA_VERSION,
     }
-    return append_event(events_directory, event)
+    return append_event(
+        events_directory,
+        event,
+        expected_prior_sequence=expected_prior_sequence,
+    )

@@ -3,12 +3,13 @@ import tempfile
 import unittest
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest import mock
 from pathlib import Path
 
-from proofloom.assertions import write_json_atomic
+from proofloom.assertions import validate_candidates, write_json_atomic
 from proofloom.entities import write_dictionary
-from proofloom.reviews import ReviewError, append_event, fold_status, load_events
+from proofloom.reviews import ReviewConflict, ReviewError, append_event, fold_status, load_events, review as review_assertion
 
 from test_fixture_extraction import NOW, dictionary, fragments
 from test_project_ui import RunningApplication, hidden_field, open_page, submit_form
@@ -50,6 +51,51 @@ def create_review_project(root: Path, assertion=None):
 
 
 class AssertionReviewUiTests(unittest.TestCase):
+    def test_independent_review_calls_use_cas_so_only_one_replace_commits(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            directory = Path(root_name)
+            barrier = Barrier(2)
+            real_append = append_event
+            def gated_append(event_directory, event, expected_prior_sequence=None):
+                barrier.wait()
+                return real_append(event_directory, event, expected_prior_sequence=expected_prior_sequence)
+            def replace(predicate):
+                try:
+                    review_assertion("replace", "ast_review_original", [candidate()], directory, dictionary(), fragments(), {"subject_id": "entity_111111111111111111111111", "predicate": predicate, "object_id": "entity_222222222222222222222222"})
+                    return "committed"
+                except ReviewConflict:
+                    return "conflict"
+            with mock.patch("proofloom.reviews.append_event", side_effect=gated_append):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    outcomes = list(pool.map(replace, ("PRODUCES", "BLOCKS")))
+            self.assertEqual(["committed", "conflict"], sorted(outcomes))
+            self.assertEqual(1, len(load_events(directory)))
+
+    def test_load_rejects_replacement_lineage_not_matching_event_subject(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            directory = Path(root_name)
+            review_assertion("replace", "ast_review_original", [candidate()], directory, dictionary(), fragments(), {"subject_id": "entity_111111111111111111111111", "predicate": "PRODUCES", "object_id": "entity_222222222222222222222222"})
+            path = next(directory.glob("*.json"))
+            event = json.loads(path.read_text())
+            event["replacement_assertion"]["replaces_assertion_id"] = "different-original"
+            path.write_text(json.dumps(event), encoding="utf-8")
+            with self.assertRaisesRegex(ReviewError, "replacement_assertion.replaces_assertion_id"):
+                load_events(directory)
+
+    def test_replacement_contract_reuses_candidate_schema_and_candidate_validation(self):
+        schemas = Path(__file__).parents[1] / "src" / "proofloom" / "schemas"
+        candidate_schema = json.loads((schemas / "candidate-assertion.schema.json").read_text())
+        event_schema = json.loads((schemas / "review-event.schema.json").read_text())
+        self.assertEqual(
+            "https://proofloom.local/schemas/candidate-assertion.schema.json",
+            event_schema["$defs"]["replacementAssertion"]["allOf"][0]["$ref"],
+        )
+        self.assertIn("replaces_assertion_id", candidate_schema["properties"])
+        ordinary = candidate()
+        self.assertTrue(validate_candidates([ordinary], dictionary(), fragments())[0]["valid"])
+        replacement = dict(ordinary, id="ast_replacement_contract", replaces_assertion_id="ast_review_original")
+        self.assertTrue(validate_candidates([replacement], dictionary(), fragments())[0]["valid"])
+
     def test_append_sequence_not_clock_orders_state_and_filenames(self):
         with tempfile.TemporaryDirectory() as root_name:
             directory = Path(root_name)

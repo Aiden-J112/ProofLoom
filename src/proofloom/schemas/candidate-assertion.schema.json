@@ -13,6 +13,7 @@
     "primary_evidence_id": {"type": "string", "minLength": 1},
     "supporting_evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
     "status": {"const": "candidate"},
+    "replaces_assertion_id": {"type": "string", "minLength": 1},
     "extraction": {
       "type": "object",
       "additionalProperties": false,
