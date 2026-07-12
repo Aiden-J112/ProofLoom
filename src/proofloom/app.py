@@ -28,7 +28,7 @@ from proofloom.sources import (
     merge_source_fragments,
     write_source_fragments,
 )
-from proofloom.reviews import ReviewError, fold_status, load_events, review
+from proofloom.reviews import ReviewConflict, ReviewError, fold_status, load_events, replacement_assertions, review
 
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
@@ -138,10 +138,6 @@ def _validation_path(project_path: Path) -> Path:
     return project_path / METADATA_DIRECTORY / "assertion-validation.json"
 
 
-def _ledger_path(project_path: Path) -> Path:
-    return project_path / METADATA_DIRECTORY / "assertion-ledger.json"
-
-
 def _review_events_path(project_path: Path) -> Path:
     return project_path / METADATA_DIRECTORY / "review-events"
 
@@ -153,13 +149,12 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
         except (OSError, json.JSONDecodeError):
             return default
     candidates = load(_assertions_path(project_path), [])
-    ledger = load(_ledger_path(project_path), [])
     validation = load(_validation_path(project_path), [])
     fragments = load(_fragments_path(project_path), [])
     events = load_events(_review_events_path(project_path))
     fragment_by_id = {item.get("id"): item for item in fragments if isinstance(item, dict)}
     cards = []
-    for candidate in [*candidates, *ledger]:
+    for candidate in [*candidates, *replacement_assertions(events)]:
         evidence_ids = [candidate["primary_evidence_id"], *candidate["supporting_evidence_ids"]]
         evidence = []
         for index, evidence_id in enumerate(evidence_ids):
@@ -171,8 +166,13 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
         history = "".join(f"<li>Action: {html.escape(str(event['action']))}; Reviewer: {html.escape(str(event['reviewer']))}; Reviewed at: {html.escape(str(event['reviewed_at']))}; Note: {html.escape(str(event.get('note') or ''))}</li>" for event in assertion_events)
         project_value = html.escape(str(project_path))
         assertion_value = html.escape(str(candidate["id"]))
-        forms = "".join('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="{action}"><label>Note <input name="note"></label><button type="submit">{label}</button></form>' for action, label in (("accept", "Accept"), ("reject", "Reject"), ("needs_domain_review", "Needs domain review")))
-        replace_form = ('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="replace">' f'<label>Subject <input name="subject_id" value="{html.escape(str(candidate["subject_id"]))}" required></label><label>Predicate <input name="predicate" value="{html.escape(str(candidate["predicate"]))}" required></label><label>Object <input name="object_id" value="{html.escape(str(candidate["object_id"]))}" required></label><label>Note <input name="note"></label><button type="submit">Replace</button></form>')
+        terminal = any(event.get("assertion_id") == candidate.get("id") and event.get("action") == "replace" for event in events)
+        if terminal:
+            forms = '<p>Terminal: replaced assertions cannot be reviewed again</p>'
+            replace_form = ""
+        else:
+            forms = "".join('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="{action}"><label>Note <input name="note"></label><button type="submit">{label}</button></form>' for action, label in (("accept", "Accept"), ("reject", "Reject"), ("needs_domain_review", "Needs domain review")))
+            replace_form = ('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="replace">' f'<label>Subject <input name="subject_id" value="{html.escape(str(candidate["subject_id"]))}" required></label><label>Predicate <input name="predicate" value="{html.escape(str(candidate["predicate"]))}" required></label><label>Object <input name="object_id" value="{html.escape(str(candidate["object_id"]))}" required></label><label>Note <input name="note"></label><button type="submit">Replace</button></form>')
         replaces = f"<p>Replaces: {html.escape(str(candidate['replaces_assertion_id']))}</p>" if candidate.get("replaces_assertion_id") else ""
         cards.append("<article>" f"<h3>{assertion_value}</h3><h4>Original extractor proposal</h4>" f"<p>Subject: {html.escape(str(candidate['subject_id']))}</p><p>Predicate: {html.escape(str(candidate['predicate']))}</p><p>Object: {html.escape(str(candidate['object_id']))}</p>" f"<p>Current status: {html.escape(fold_status(str(candidate['id']), events))}</p>{replaces}" f"<p>provider={html.escape(str(extraction['provider']))}; model={html.escape(str(extraction['model']))}; prompt_version={html.escape(str(extraction['prompt_version']))}; schema_version={html.escape(str(extraction['schema_version']))}; generated_at={html.escape(str(extraction['generated_at']))}; mode={html.escape(str(extraction['mode']))}</p>" f"<h4>Evidence References</h4><ul>{''.join(evidence)}</ul>{forms}{replace_form}<h4>Review Event history</h4><ul>{history or '<li>No Review Events.</li>'}</ul></article>")
     validation_items = []
@@ -470,17 +470,17 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
     def _review_assertion(self, form: dict[str, str]) -> None:
         try:
             project_path = self._entity_project(form.get("project", ""))
-            candidates = json.loads(_assertions_path(project_path).read_text(encoding="utf-8"))
-            dictionary = load_dictionary(_entities_path(project_path))
-            fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
-            try:
-                ledger = json.loads(_ledger_path(project_path).read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                ledger = []
-            if not all(isinstance(value, list) for value in (candidates, fragments, ledger)):
-                raise ReviewError("Stored assertion and evidence records must be lists")
             with self.server.assertion_lock:
-                review(form.get("action", ""), form.get("assertion_id", ""), candidates, ledger, _review_events_path(project_path), _ledger_path(project_path), dictionary, fragments, {key: form.get(key, "") for key in ("subject_id", "predicate", "object_id")}, form.get("note"))
+                candidates = json.loads(_assertions_path(project_path).read_text(encoding="utf-8"))
+                dictionary = load_dictionary(_entities_path(project_path))
+                fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
+                load_events(_review_events_path(project_path))
+                if not all(isinstance(value, list) for value in (candidates, fragments)):
+                    raise ReviewError("Stored assertion and evidence records must be lists")
+                review(form.get("action", ""), form.get("assertion_id", ""), candidates, _review_events_path(project_path), dictionary, fragments, {key: form.get(key, "") for key in ("subject_id", "predicate", "object_id")}, form.get("note"))
+        except ReviewConflict as error:
+            self.send_error(HTTPStatus.CONFLICT, str(error))
+            return
         except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError, ReviewError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
