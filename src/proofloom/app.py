@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, validate_candidates, write_extraction_results
+from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, TYPE_CONTRACTS, validate_candidates, write_extraction_results
 from proofloom.entities import (
     ENTITY_TYPES,
     EntityConflictError,
@@ -29,6 +29,7 @@ from proofloom.sources import (
     write_source_fragments,
 )
 from proofloom.reviews import ReviewConflict, ReviewError, fold_status, load_events, replacement_assertions, review
+from proofloom.graphs import GraphProjectionError, project_query_graph
 
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
@@ -140,6 +141,112 @@ def _validation_path(project_path: Path) -> Path:
 
 def _review_events_path(project_path: Path) -> Path:
     return project_path / METADATA_DIRECTORY / "review-events"
+
+
+def _graph_page(
+    project_path: Path,
+    graph: dict[str, object],
+    entity_type: str = "",
+    relationship_type: str = "",
+    selected_assertion_id: str = "",
+) -> bytes:
+    nodes = graph["nodes"]
+    edges = graph["edges"]
+    assert isinstance(nodes, list) and isinstance(edges, list)
+    visible_nodes = [
+        node for node in nodes
+        if isinstance(node, dict) and (not entity_type or node.get("type") == entity_type)
+    ]
+    visible_node_ids = {node["id"] for node in visible_nodes}
+    visible_edges = [
+        edge for edge in edges
+        if isinstance(edge, dict)
+        and (not relationship_type or edge.get("type") == relationship_type)
+        and edge.get("source") in visible_node_ids
+        and edge.get("target") in visible_node_ids
+    ]
+    project_value = html.escape(str(project_path))
+    entity_options = ['<option value="">All entity types</option>'] + [
+        f'<option value="{kind}"{" selected" if kind == entity_type else ""}>{kind}</option>'
+        for kind in ENTITY_TYPES
+    ]
+    relationship_options = ['<option value="">All relationship types</option>'] + [
+        f'<option value="{kind}"{" selected" if kind == relationship_type else ""}>{kind}</option>'
+        for kind in TYPE_CONTRACTS
+    ]
+    node_items = "".join(
+        '<article class="graph-node" '
+        f'data-entity-type="{html.escape(str(node["type"]))}">'
+        f'<h3>{html.escape(str(node["name"]))}</h3>'
+        f'<p>Entity ID: {html.escape(str(node["id"]))}</p>'
+        f'<p>Entity type: {html.escape(str(node["type"]))}</p></article>'
+        for node in visible_nodes
+    )
+    edge_items = "".join(
+        '<article class="graph-edge" '
+        f'data-relationship-type="{html.escape(str(edge["type"]))}">'
+        f'<p>{html.escape(str(edge["source"]))} &rarr; {html.escape(str(edge["target"]))}</p>'
+        f'<p>Relationship type: {html.escape(str(edge["type"]))}</p>'
+        f'<p>Assertion ID: {html.escape(str(edge["assertion_id"]))}</p>'
+        f'<a href="/graph?project={quote(str(project_path))}&amp;entity_type={quote(entity_type)}'
+        f'&amp;relationship_type={quote(relationship_type)}&amp;assertion_id={quote(str(edge["assertion_id"]))}">'
+        f'Trace evidence for {html.escape(str(edge["assertion_id"]))}</a></article>'
+        for edge in visible_edges
+    )
+    evidence_panel = _edge_evidence_panel(project_path, selected_assertion_id, visible_edges)
+    return _page(
+        '<h2>Graph Explorer</h2>'
+        '<form method="get" action="/graph">'
+        f'<input type="hidden" name="project" value="{project_value}">'
+        f'<label>Entity type <select name="entity_type">{"".join(entity_options)}</select></label>'
+        f'<label>Relationship type <select name="relationship_type">{"".join(relationship_options)}</select></label>'
+        '<button type="submit">Filter graph</button></form>'
+        f'<h2>Entities</h2>{node_items or "<p>No matching entities.</p>"}'
+        f'<h2>Relationships</h2>{edge_items or "<p>No matching relationships.</p>"}'
+        f'{evidence_panel}'
+    )
+
+
+def _edge_evidence_panel(
+    project_path: Path,
+    assertion_id: str,
+    visible_edges: list[dict[str, object]],
+) -> str:
+    if not assertion_id:
+        return ""
+    if assertion_id not in {str(edge.get("assertion_id", "")) for edge in visible_edges}:
+        raise GraphProjectionError("assertion_id: select a displayed Query Graph edge")
+    candidates = json.loads(_assertions_path(project_path).read_text(encoding="utf-8"))
+    fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
+    events = load_events(_review_events_path(project_path))
+    if not isinstance(candidates, list) or not isinstance(fragments, list):
+        raise GraphProjectionError("Stored assertion and evidence records must be lists")
+    assertion = next(
+        (item for item in [*candidates, *replacement_assertions(events)] if isinstance(item, dict) and item.get("id") == assertion_id),
+        None,
+    )
+    if assertion is None:
+        raise GraphProjectionError("assertion_id: Query Graph assertion is missing from the Assertion Ledger")
+    fragment_by_id = {item.get("id"): item for item in fragments if isinstance(item, dict)}
+    evidence_ids = [assertion["primary_evidence_id"], *assertion["supporting_evidence_ids"]]
+    evidence_items = []
+    for index, evidence_id in enumerate(evidence_ids):
+        fragment = fragment_by_id.get(evidence_id)
+        if not isinstance(fragment, dict):
+            raise GraphProjectionError(f"Evidence Reference {evidence_id!r} does not resolve to a Source Fragment")
+        role = "Primary evidence" if index == 0 else "Supporting evidence"
+        evidence_items.append(
+            '<article class="source-fragment">'
+            f'<h4>{role}</h4><p>Source file: {html.escape(str(fragment["source_file"]))}</p>'
+            f'<p>Heading path: {html.escape(" / ".join(map(str, fragment["heading_path"])))}</p>'
+            f'<pre>{html.escape(str(fragment["content"]))}</pre></article>'
+        )
+    return (
+        '<section id="evidence-panel"><h2>Evidence</h2>'
+        f'<p>Assertion ID: {html.escape(assertion_id)}</p>'
+        f'<p>Assertion status: {html.escape(fold_status(assertion_id, events))}</p>'
+        f'{"".join(evidence_items)}</section>'
+    )
 
 
 def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
@@ -301,6 +408,10 @@ def _project_page(
         f'<p><a href="/sources?project={quote(str(project_path))}">Choose Markdown source</a></p>'
         f'<p><a href="/entities?project={quote(str(project_path))}">Review Entity Dictionary</a></p>'
         f'<p><a href="/assertions?project={quote(str(project_path))}">Extract Candidate Assertions</a></p>'
+        '<form method="post" action="/graphs/project">'
+        f'{_csrf_field(csrf_token)}'
+        f'<input type="hidden" name="project" value="{html.escape(str(project_path))}">'
+        '<button type="submit">Project and explore graph</button></form>'
         f"<h3>Source Fragments</h3>{fragment_items or '<p>No Source Fragments imported.</p>'}"
     )
 
@@ -329,6 +440,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._show_entities(query)
         elif request.path == "/assertions":
             self._show_assertions(query)
+        elif request.path == "/graph":
+            self._show_graph(query)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -363,6 +476,8 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             self._extract(form, extractor)
         elif self.path == "/assertions/review":
             self._review_assertion(form)
+        elif self.path == "/graphs/project":
+            self._project_graph(form)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -439,6 +554,37 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, EntityDictionaryError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
         self._send_page(_assertion_page(project_path, self.server.csrf_token))
+
+    def _show_graph(self, query: dict[str, list[str]]) -> None:
+        try:
+            project_path = self._entity_project(query.get("project", [""])[0])
+            entity_type = query.get("entity_type", [""])[0]
+            relationship_type = query.get("relationship_type", [""])[0]
+            if entity_type and entity_type not in ENTITY_TYPES:
+                raise GraphProjectionError("entity_type: unknown Entity Dictionary type")
+            if relationship_type and relationship_type not in TYPE_CONTRACTS:
+                raise GraphProjectionError("relationship_type: unknown relationship type")
+            graph = project_query_graph(project_path)
+            page = _graph_page(
+                project_path,
+                graph,
+                entity_type,
+                relationship_type,
+                query.get("assertion_id", [""])[0],
+            )
+        except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError, ReviewError, GraphProjectionError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(page)
+
+    def _project_graph(self, form: dict[str, str]) -> None:
+        try:
+            project_path = self._entity_project(form.get("project", ""))
+            graph = project_query_graph(project_path)
+        except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError, ReviewError, GraphProjectionError) as error:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        self._send_page(_graph_page(project_path, graph))
 
     def _extract(self, form: dict[str, str], extractor) -> None:
         try:

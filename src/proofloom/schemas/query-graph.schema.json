@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofloom.local/schemas/query-graph.schema.json",
+  "title": "ProofLoom Query Graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "nodes", "edges"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "nodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "edges": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/edge"}
+    }
+  },
+  "$defs": {
+    "entityId": {"type": "string", "pattern": "^entity_[a-f0-9]{24}$"},
+    "nonBlankString": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "name"],
+      "properties": {
+        "id": {"$ref": "#/$defs/entityId"},
+        "type": {"enum": ["Component", "Artifact", "Pattern", "Concept"]},
+        "name": {"$ref": "#/$defs/nonBlankString"}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "type", "target", "assertion_id"],
+      "properties": {
+        "source": {"$ref": "#/$defs/entityId"},
+        "type": {"enum": ["COMPOSED_OF", "PROMPTS", "CALLS_TOOL", "PRODUCES", "VERIFIES", "BLOCKS"]},
+        "target": {"$ref": "#/$defs/entityId"},
+        "assertion_id": {"$ref": "#/$defs/nonBlankString"}
+      }
+    }
+  }
+}
