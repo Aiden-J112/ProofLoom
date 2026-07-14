@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofloom.local/schemas/source-fragment.schema.json",
+  "title": "Source Fragment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "source_file", "heading_path", "ordinal", "kind", "content", "content_hash", "status", "schema_version"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^src_[0-9a-f]{24}$"},
+    "source_file": {"type": "string", "minLength": 1},
+    "heading_path": {"type": "array", "items": {"type": "string"}},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "kind": {"enum": ["paragraph", "list", "code_block"]},
+    "content": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "status": {"enum": ["current", "changed"]},
+    "schema_version": {"const": "1"}
+  }
+}

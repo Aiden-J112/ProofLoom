@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, TYPE_CONTRACTS, validate_candidates, write_extraction_results
+from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, TYPE_CONTRACTS, append_new_candidates, prepare_extracted_candidates, validate_candidates, write_extraction_results
 from proofloom.entities import (
     ENTITY_TYPES,
     EntityConflictError,
@@ -28,7 +28,7 @@ from proofloom.sources import (
     merge_source_fragments,
     write_source_fragments,
 )
-from proofloom.reviews import ReviewConflict, ReviewError, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review
+from proofloom.reviews import ReviewConflict, ReviewError, current_assertion_status, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review
 from proofloom.graphs import GraphProjectionError, project_query_graph
 
 METADATA_DIRECTORY = ".proofloom"
@@ -234,7 +234,7 @@ def _edge_evidence_panel(
     return (
         '<section id="evidence-panel"><h2>Evidence</h2>'
         f'<p>Assertion ID: {html.escape(assertion_id)}</p>'
-        f'<p>Assertion status: {html.escape(fold_status(assertion_id, events))}</p>'
+        f'<p>Assertion status: {html.escape(current_assertion_status(assertion_id, candidates, events, fragments))}</p>'
         f'{"".join(evidence_items)}</section>'
     )
 
@@ -271,7 +271,7 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
             forms = "".join('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="{action}"><label>Note <input name="note"></label><button type="submit">{label}</button></form>' for action, label in (("accept", "Accept"), ("reject", "Reject"), ("needs_domain_review", "Needs domain review")))
             replace_form = ('<form method="post" action="/assertions/review">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project_value}"><input type="hidden" name="assertion_id" value="{assertion_value}"><input type="hidden" name="action" value="replace">' f'<label>Subject <input name="subject_id" value="{html.escape(str(candidate["subject_id"]))}" required></label><label>Predicate <input name="predicate" value="{html.escape(str(candidate["predicate"]))}" required></label><label>Object <input name="object_id" value="{html.escape(str(candidate["object_id"]))}" required></label><label>Note <input name="note"></label><button type="submit">Replace</button></form>')
         replaces = f"<p>Replaces: {html.escape(str(candidate['replaces_assertion_id']))}</p>" if candidate.get("replaces_assertion_id") else ""
-        cards.append("<article>" f"<h3>{assertion_value}</h3><h4>Original extractor proposal</h4>" f"<p>Subject: {html.escape(str(candidate['subject_id']))}</p><p>Predicate: {html.escape(str(candidate['predicate']))}</p><p>Object: {html.escape(str(candidate['object_id']))}</p>" f"<p>Current status: {html.escape(fold_status(str(candidate['id']), events))}</p>{replaces}" f"<p>provider={html.escape(str(extraction['provider']))}; model={html.escape(str(extraction['model']))}; prompt_version={html.escape(str(extraction['prompt_version']))}; schema_version={html.escape(str(extraction['schema_version']))}; generated_at={html.escape(str(extraction['generated_at']))}; mode={html.escape(str(extraction['mode']))}</p>" f"<h4>Evidence References</h4><ul>{''.join(evidence)}</ul>{forms}{replace_form}<h4>Review Event history</h4><ul>{history or '<li>No Review Events.</li>'}</ul></article>")
+        cards.append("<article>" f"<h3>{assertion_value}</h3><h4>Original extractor proposal</h4>" f"<p>Subject: {html.escape(str(candidate['subject_id']))}</p><p>Predicate: {html.escape(str(candidate['predicate']))}</p><p>Object: {html.escape(str(candidate['object_id']))}</p>" f"<p>Current status: {html.escape(current_assertion_status(str(candidate['id']), candidates, events, fragments))}</p>{replaces}" f"<p>provider={html.escape(str(extraction['provider']))}; model={html.escape(str(extraction['model']))}; prompt_version={html.escape(str(extraction['prompt_version']))}; schema_version={html.escape(str(extraction['schema_version']))}; generated_at={html.escape(str(extraction['generated_at']))}; mode={html.escape(str(extraction['mode']))}</p>" f"<h4>Evidence References</h4><ul>{''.join(evidence)}</ul>{forms}{replace_form}<h4>Review Event history</h4><ul>{history or '<li>No Review Events.</li>'}</ul></article>")
     validation_items = []
     for item in validation:
         outcome = "valid" if item.get("valid") else "; ".join(f"{reason['field']}: {reason['reason']}" for reason in item.get("reasons", []))
@@ -379,6 +379,7 @@ def _project_page(
         f"<p>{html.escape(str(fragment['source_file']))} — "
         f"{html.escape(' / '.join(str(part) for part in fragment['heading_path']))}</p>"
         f"<p>Ordinal: {fragment['ordinal']} · Kind: {html.escape(str(fragment['kind']))}</p>"
+        f"<p>Source Fragment status: {html.escape(str(fragment.get('status', 'current')))}</p>"
         f"<pre>{html.escape(str(fragment['content']))}</pre>"
         "</article>"
         for fragment in fragments
@@ -583,14 +584,12 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
             fragments = json.loads(_fragments_path(project_path).read_text(encoding="utf-8"))
             if not isinstance(fragments, list):
                 raise ValueError("Stored Source Fragments must be a list")
-            candidates = extractor.extract(dictionary, fragments)
-            validation = validate_candidates(candidates, dictionary, fragments)
-            valid_indices = {
-                item["candidate_index"] for item in validation if item["valid"]
-            }
-            valid_candidates = [
-                item for index, item in enumerate(candidates) if index in valid_indices
+            current_fragments = [
+                fragment
+                for fragment in fragments
+                if isinstance(fragment, dict) and fragment.get("status") != "changed"
             ]
+            candidates = extractor.extract(dictionary, current_fragments)
             with self.server.assertion_lock:
                 try:
                     existing_candidates = json.loads(_assertions_path(project_path).read_text(encoding="utf-8"))
@@ -598,13 +597,19 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
                     existing_candidates = []
                 if not isinstance(existing_candidates, list):
                     raise ValueError("Stored Candidate Assertions must be a list")
-                existing_by_id = {item.get("id"): item for item in existing_candidates if isinstance(item, dict)}
-                valid_candidates = [existing_by_id.get(item.get("id"), item) for item in valid_candidates]
+                candidates = prepare_extracted_candidates(existing_candidates, candidates)
+                validation = validate_candidates(candidates, dictionary, current_fragments)
+                valid_indices = {
+                    item["candidate_index"] for item in validation if item["valid"]
+                }
+                valid_candidates = [
+                    item for index, item in enumerate(candidates) if index in valid_indices
+                ]
                 write_extraction_results(
                     _validation_path(project_path),
                     _assertions_path(project_path),
                     validation,
-                    valid_candidates,
+                    append_new_candidates(existing_candidates, valid_candidates),
                 )
         except (OSError, json.JSONDecodeError, ValueError, EntityDictionaryError, ExtractionError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error)); return
@@ -775,22 +780,23 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Unsupported project schema version")
             imported = import_markdown(source_path, self.server.browse_root)
             fragments_path = _fragments_path(project_path)
-            try:
-                existing = json.loads(fragments_path.read_text(encoding="utf-8"))
-                if not isinstance(existing, list):
-                    raise ValueError("Stored Source Fragments must be a list")
-            except FileNotFoundError:
-                existing = []
             source_locator = source_path.relative_to(
                 self.server.browse_root
             ).as_posix()
-            fragments = merge_source_fragments(
-                existing,
-                imported,
-                source_locator,
-                source_path.is_dir(),
-            )
-            write_source_fragments(fragments_path, fragments)
+            with self.server.assertion_lock:
+                try:
+                    existing = json.loads(fragments_path.read_text(encoding="utf-8"))
+                    if not isinstance(existing, list):
+                        raise ValueError("Stored Source Fragments must be a list")
+                except FileNotFoundError:
+                    existing = []
+                fragments = merge_source_fragments(
+                    existing,
+                    imported,
+                    source_locator,
+                    source_path.is_dir(),
+                )
+                write_source_fragments(fragments_path, fragments)
         except (OSError, json.JSONDecodeError, SourceImportError, ValueError) as error:
             self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return

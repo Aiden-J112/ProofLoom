@@ -5,9 +5,20 @@ import json
 import os
 import re
 import tempfile
+from importlib.resources import files
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 SOURCE_FRAGMENT_SCHEMA_VERSION = "1"
+
+_SCHEMA = json.loads(
+    files("proofloom").joinpath("schemas/source-fragment.schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+Draft202012Validator.check_schema(_SCHEMA)
+_VALIDATOR = Draft202012Validator(_SCHEMA)
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _LIST_ITEM = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
@@ -44,6 +55,7 @@ def _fragment(
         "kind": kind,
         "content": content,
         "content_hash": f"sha256:{content_digest}",
+        "status": "current",
         "schema_version": SOURCE_FRAGMENT_SCHEMA_VERSION,
     }
 
@@ -186,26 +198,50 @@ def merge_source_fragments(
     source_locator: str,
     source_is_directory: bool,
 ) -> list[dict[str, object]]:
-    if source_is_directory:
-        prefix = "" if source_locator == "." else source_locator.rstrip("/") + "/"
-        retained = [
-            fragment
-            for fragment in existing
-            if not str(fragment.get("source_file", "")).startswith(prefix)
-        ]
-    else:
-        retained = [
-            fragment
-            for fragment in existing
-            if fragment.get("source_file") != source_locator
-        ]
+    def in_rescanned_scope(fragment: dict[str, object]) -> bool:
+        source_file = str(fragment.get("source_file", ""))
+        if source_is_directory:
+            prefix = "" if source_locator == "." else source_locator.rstrip("/") + "/"
+            return source_file.startswith(prefix)
+        return source_file == source_locator
+
+    imported_current = [dict(fragment, status="current") for fragment in imported]
+    imported_ids = {fragment.get("id") for fragment in imported_current}
+    imported_by_locator = {
+        _source_locator_key(fragment): fragment for fragment in imported_current
+    }
+    retained: list[dict[str, object]] = []
+    for fragment in existing:
+        if not in_rescanned_scope(fragment):
+            retained.append(
+                fragment if fragment.get("status") is not None else dict(fragment, status="current")
+            )
+        elif fragment.get("status") == "changed" and fragment.get("id") not in imported_ids:
+            retained.append(fragment)
+        elif (
+            _source_locator_key(fragment) not in imported_by_locator
+            or fragment.get("content_hash")
+            != imported_by_locator[_source_locator_key(fragment)].get("content_hash")
+        ):
+            retained.append(dict(fragment, status="changed"))
     return sorted(
-        retained + imported,
+        retained + imported_current,
         key=lambda fragment: (
             str(fragment.get("source_file", "")),
             tuple(fragment.get("heading_path", [])),
             int(fragment.get("ordinal", 0)),
+            str(fragment.get("id", "")),
         ),
+    )
+
+
+def _source_locator_key(fragment: dict[str, object]) -> tuple[object, ...]:
+    heading_path = fragment.get("heading_path")
+    return (
+        fragment.get("source_file"),
+        tuple(heading_path) if isinstance(heading_path, list) else repr(heading_path),
+        fragment.get("ordinal"),
+        fragment.get("kind"),
     )
 
 
@@ -213,6 +249,22 @@ def write_source_fragments(
     destination: Path,
     fragments: list[dict[str, object]],
 ) -> None:
+    seen: set[object] = set()
+    for index, fragment in enumerate(fragments):
+        errors = sorted(
+            _VALIDATOR.iter_errors(fragment),
+            key=lambda error: tuple(map(str, error.absolute_path)),
+        )
+        if errors:
+            error = errors[0]
+            field = ".".join(map(str, error.absolute_path)) or "$"
+            raise SourceImportError(
+                f"Source Fragment {index} schema error at {field}: {error.message}"
+            )
+        fragment_id = fragment.get("id")
+        if fragment_id in seen:
+            raise SourceImportError(f"Source Fragment id: duplicate value {fragment_id!r}")
+        seen.add(fragment_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=destination.parent,

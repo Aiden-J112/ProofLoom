@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator
 
 from proofloom.assertions import validate_candidates, write_json_atomic
 from proofloom.entities import load_dictionary
-from proofloom.reviews import fold_status, load_events, replacement_assertions
+from proofloom.reviews import current_assertion_status, load_events, replacement_assertions
 
 QUERY_GRAPH_SCHEMA_VERSION = "1"
 
@@ -59,7 +59,9 @@ def project_query_graph(project_path: Path) -> dict[str, object]:
     for assertion, result in zip(assertions, validation):
         if (
             not result["valid"]
-            or fold_status(str(assertion.get("id", "")), events) != "accepted"
+            or current_assertion_status(
+                str(assertion.get("id", "")), candidates, events, fragments
+            ) != "accepted"
             or not _has_traceable_evidence(assertion, fragment_by_id)
         ):
             continue

@@ -130,6 +130,45 @@ def fold_status(assertion_id: str, events: list[dict[str, object]]) -> str:
     return status
 
 
+def current_assertion_status(
+    assertion_id: str,
+    candidates: list[dict[str, object]],
+    events: list[dict[str, object]],
+    fragments: list[dict[str, object]],
+) -> str:
+    """Fold review history and current evidence into the Assertion Ledger state."""
+    status = fold_status(assertion_id, events)
+    if status != "accepted":
+        return status
+    assertion = next(
+        (
+            item
+            for item in [*candidates, *replacement_assertions(events)]
+            if item.get("id") == assertion_id
+        ),
+        None,
+    )
+    if assertion is None:
+        return status
+    supporting = assertion.get("supporting_evidence_ids")
+    evidence_ids = [assertion.get("primary_evidence_id")]
+    if isinstance(supporting, list):
+        evidence_ids.extend(supporting)
+    fragment_by_id: dict[object, dict[str, object]] = {}
+    for fragment in fragments:
+        fragment_id = fragment.get("id")
+        if fragment_id in fragment_by_id:
+            raise ReviewError(f"Source Fragment id: duplicate value {fragment_id!r}")
+        fragment_by_id[fragment_id] = fragment
+    if any(
+        evidence_id not in fragment_by_id
+        or fragment_by_id[evidence_id].get("status") == "changed"
+        for evidence_id in evidence_ids
+    ):
+        return "stale"
+    return status
+
+
 def append_event(
     directory: Path,
     event: dict[str, object],

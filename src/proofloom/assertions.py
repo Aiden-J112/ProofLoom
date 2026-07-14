@@ -281,6 +281,90 @@ def write_extraction_results(
         raise
 
 
+_ASSERTION_PROPOSAL_FIELDS = (
+    "subject_id",
+    "predicate",
+    "object_id",
+    "primary_evidence_id",
+    "supporting_evidence_ids",
+    "status",
+    "replaces_assertion_id",
+)
+
+
+def prepare_extracted_candidates(
+    existing: list[dict[str, object]],
+    extracted: list[object],
+) -> list[object]:
+    """Assign fresh deterministic ledger IDs to materially changed ID collisions."""
+    by_id = {
+        item.get("id"): item
+        for item in existing
+        if isinstance(item.get("id"), str)
+    }
+    extracted_id_counts: dict[str, int] = {}
+    for item in extracted:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            item_id = str(item["id"])
+            extracted_id_counts[item_id] = extracted_id_counts.get(item_id, 0) + 1
+    prepared: list[object] = []
+    for item in extracted:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            prepared.append(item)
+            continue
+        if extracted_id_counts[str(item["id"])] > 1:
+            prepared.append(item)
+            continue
+        collision = by_id.get(item["id"])
+        if collision is None:
+            prepared.append(item)
+            continue
+        if _same_proposal(collision, item):
+            prepared.append(collision)
+            continue
+        base_id = str(item["id"])
+        payload = json.dumps(
+            {field: item.get(field) for field in _ASSERTION_PROPOSAL_FIELDS},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        attempt = 0
+        while True:
+            material = f"{base_id}\0{payload}\0{attempt}"
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+            fresh_id = f"{base_id}_reextracted_{digest}"
+            prior = by_id.get(fresh_id)
+            rekeyed = dict(item, id=fresh_id)
+            if prior is None:
+                by_id[fresh_id] = rekeyed
+                prepared.append(rekeyed)
+                break
+            if _same_proposal(prior, rekeyed):
+                prepared.append(prior)
+                break
+            attempt += 1
+    return prepared
+
+
+def append_new_candidates(
+    existing: list[dict[str, object]],
+    extracted: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Preserve the Candidate Assertion ledger while adding new proposals."""
+    merged = list(existing)
+    known = {item.get("id") for item in existing}
+    for item in extracted:
+        if item.get("id") not in known:
+            merged.append(item)
+            known.add(item.get("id"))
+    return merged
+
+
+def _same_proposal(left: dict[str, object], right: dict[str, object]) -> bool:
+    return all(left.get(field) == right.get(field) for field in _ASSERTION_PROPOSAL_FIELDS)
+
+
 def _read_json_or_missing(path: Path, missing: object) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))

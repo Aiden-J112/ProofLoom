@@ -139,6 +139,7 @@ class SourceImportUiTests(unittest.TestCase):
             for fragment in fragments:
                 self.assertEqual("lesson.md", fragment["source_file"])
                 self.assertEqual("1", fragment["schema_version"])
+                self.assertEqual("current", fragment["status"])
                 self.assertTrue(fragment["id"].startswith("src_"))
                 self.assertTrue(fragment["content_hash"].startswith("sha256:"))
                 self.assertIn("content", fragment)
@@ -180,6 +181,8 @@ class SourceImportUiTests(unittest.TestCase):
                 )
 
             self.assertEqual([f["id"] for f in first], [f["id"] for f in second])
+            self.assertEqual(first, second)
+            self.assertTrue(all(fragment["status"] == "current" for fragment in second))
 
     def test_imports_merge_distinct_sources_and_reimport_replaces_only_that_source(self):
         with tempfile.TemporaryDirectory() as root:
@@ -209,13 +212,18 @@ class SourceImportUiTests(unittest.TestCase):
             fragments = json.loads(
                 (project_path / ".proofloom" / "source-fragments.json").read_text()
             )
+            current = [item for item in fragments if item["status"] == "current"]
             self.assertEqual(
                 ["first/lesson.md", "second/lesson.md"],
-                sorted(item["source_file"] for item in fragments),
+                sorted(item["source_file"] for item in current),
             )
-            contents = {item["source_file"]: item["content"] for item in fragments}
+            contents = {item["source_file"]: item["content"] for item in current}
             self.assertEqual("New first.", contents["first/lesson.md"])
             self.assertEqual("Keep second.", contents["second/lesson.md"])
+            self.assertEqual(
+                ["Old first."],
+                [item["content"] for item in fragments if item["status"] == "changed"],
+            )
 
     def test_import_error_identifies_the_affected_file(self):
         with tempfile.TemporaryDirectory() as root:
@@ -306,12 +314,16 @@ class SourceImportUiTests(unittest.TestCase):
             previous = [{"id": "src_previous"}]
             destination.write_text(json.dumps(previous), encoding="utf-8")
 
+            replacement = sources_module.parse_markdown(
+                "# Synthetic\n\nReplacement passage.", "synthetic.md"
+            )[0]
+
             with mock.patch(
                 "proofloom.sources.os.replace", side_effect=OSError("disk full")
             ):
                 with self.assertRaises(OSError):
                     sources_module.write_source_fragments(
-                        destination, [{"id": "src_replacement"}]
+                        destination, [replacement]
                     )
 
             self.assertEqual(previous, json.loads(destination.read_text(encoding="utf-8")))
