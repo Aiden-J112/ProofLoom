@@ -124,18 +124,39 @@ class GraphProjectionUiTests(unittest.TestCase):
             root = Path(root_name)
             project = create_review_project(root)
             metadata = project / ".proofloom"
+            reviewed = candidate()
+            reviewed["supporting_evidence_ids"] = ["src_supporting"]
+            source_fragments = [
+                *fragments(),
+                {
+                    "id": "src_supporting",
+                    "source_file": "supporting-signal.md",
+                    "heading_path": ["Supporting lesson"],
+                    "ordinal": 1,
+                    "kind": "paragraph",
+                    "content": "A supporting synthetic passage.",
+                    "content_hash": "sha256:supporting",
+                    "schema_version": "1",
+                },
+            ]
+            write_json_atomic(metadata / "candidate-assertions.json", [reviewed])
+            write_json_atomic(metadata / "source-fragments.json", source_fragments)
             review(
                 "accept",
                 "ast_review_original",
-                [candidate()],
+                [reviewed],
                 metadata / "review-events",
                 dictionary(),
-                fragments(),
+                source_fragments,
             )
             with RunningApplication(root) as app:
                 assertions_page = open_page(
                     app,
                     f"/assertions?project={urllib.parse.quote(str(project))}",
+                )
+                self.assertLess(
+                    assertions_page.index("The Inspector verifies the generated Report."),
+                    assertions_page.index("A supporting synthetic passage."),
                 )
                 graph_page = submit_form(
                     app,
@@ -156,6 +177,11 @@ class GraphProjectionUiTests(unittest.TestCase):
                 self.assertIn("Source file: synthetic-signal.md", evidence_page)
                 self.assertIn("Heading path: Signal lesson", evidence_page)
                 self.assertIn("The Inspector verifies the generated Report.", evidence_page)
+                self.assertIn("Source file: supporting-signal.md", evidence_page)
+                self.assertLess(
+                    evidence_page.index("The Inspector verifies the generated Report."),
+                    evidence_page.index("A supporting synthetic passage."),
+                )
 
                 component_only = open_page(
                     app,

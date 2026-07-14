@@ -79,6 +79,45 @@ def replacement_assertions(events: list[dict[str, object]]) -> list[dict[str, ob
     return [event["replacement_assertion"] for event in sorted(events, key=lambda item: int(item["sequence"])) if isinstance(event.get("replacement_assertion"), dict)]
 
 
+def resolve_assertion_evidence(
+    assertion_id: str,
+    candidates: list[dict[str, object]],
+    events: list[dict[str, object]],
+    fragments: list[dict[str, object]],
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Resolve an Assertion Ledger record and its ordered Evidence References."""
+    assertion = next(
+        (
+            item
+            for item in [*candidates, *replacement_assertions(events)]
+            if item.get("id") == assertion_id
+        ),
+        None,
+    )
+    if assertion is None:
+        raise ReviewError("assertion_id: assertion is missing from the Assertion Ledger")
+    supporting = assertion.get("supporting_evidence_ids")
+    if not isinstance(supporting, list):
+        raise ReviewError("supporting_evidence_ids: expected an array")
+    fragment_by_id = {item.get("id"): item for item in fragments}
+    evidence = []
+    for index, evidence_id in enumerate(
+        [assertion.get("primary_evidence_id"), *supporting]
+    ):
+        fragment = fragment_by_id.get(evidence_id, {})
+        heading_path = fragment.get("heading_path", [])
+        evidence.append(
+            {
+                "role": "primary" if index == 0 else "supporting",
+                "evidence_id": evidence_id,
+                "source_file": fragment.get("source_file", "missing"),
+                "heading_path": heading_path if isinstance(heading_path, list) else [],
+                "content": fragment.get("content", ""),
+            }
+        )
+    return assertion, evidence
+
+
 def fold_status(assertion_id: str, events: list[dict[str, object]]) -> str:
     status = "candidate"
     for event in sorted(events, key=lambda item: int(item["sequence"])):

@@ -28,7 +28,7 @@ from proofloom.sources import (
     merge_source_fragments,
     write_source_fragments,
 )
-from proofloom.reviews import ReviewConflict, ReviewError, fold_status, load_events, replacement_assertions, review
+from proofloom.reviews import ReviewConflict, ReviewError, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review
 from proofloom.graphs import GraphProjectionError, project_query_graph
 
 METADATA_DIRECTORY = ".proofloom"
@@ -221,25 +221,15 @@ def _edge_evidence_panel(
     events = load_events(_review_events_path(project_path))
     if not isinstance(candidates, list) or not isinstance(fragments, list):
         raise GraphProjectionError("Stored assertion and evidence records must be lists")
-    assertion = next(
-        (item for item in [*candidates, *replacement_assertions(events)] if isinstance(item, dict) and item.get("id") == assertion_id),
-        None,
-    )
-    if assertion is None:
-        raise GraphProjectionError("assertion_id: Query Graph assertion is missing from the Assertion Ledger")
-    fragment_by_id = {item.get("id"): item for item in fragments if isinstance(item, dict)}
-    evidence_ids = [assertion["primary_evidence_id"], *assertion["supporting_evidence_ids"]]
+    _, references = resolve_assertion_evidence(assertion_id, candidates, events, fragments)
     evidence_items = []
-    for index, evidence_id in enumerate(evidence_ids):
-        fragment = fragment_by_id.get(evidence_id)
-        if not isinstance(fragment, dict):
-            raise GraphProjectionError(f"Evidence Reference {evidence_id!r} does not resolve to a Source Fragment")
-        role = "Primary evidence" if index == 0 else "Supporting evidence"
+    for reference in references:
+        role = "Primary evidence" if reference["role"] == "primary" else "Supporting evidence"
         evidence_items.append(
             '<article class="source-fragment">'
-            f'<h4>{role}</h4><p>Source file: {html.escape(str(fragment["source_file"]))}</p>'
-            f'<p>Heading path: {html.escape(" / ".join(map(str, fragment["heading_path"])))}</p>'
-            f'<pre>{html.escape(str(fragment["content"]))}</pre></article>'
+            f'<h4>{role}</h4><p>Source file: {html.escape(str(reference["source_file"]))}</p>'
+            f'<p>Heading path: {html.escape(" / ".join(map(str, reference["heading_path"])))}</p>'
+            f'<pre>{html.escape(str(reference["content"]))}</pre></article>'
         )
     return (
         '<section id="evidence-panel"><h2>Evidence</h2>'
@@ -259,15 +249,15 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
     validation = load(_validation_path(project_path), [])
     fragments = load(_fragments_path(project_path), [])
     events = load_events(_review_events_path(project_path))
-    fragment_by_id = {item.get("id"): item for item in fragments if isinstance(item, dict)}
     cards = []
     for candidate in [*candidates, *replacement_assertions(events)]:
-        evidence_ids = [candidate["primary_evidence_id"], *candidate["supporting_evidence_ids"]]
+        candidate, references = resolve_assertion_evidence(
+            str(candidate["id"]), candidates, events, fragments
+        )
         evidence = []
-        for index, evidence_id in enumerate(evidence_ids):
-            fragment = fragment_by_id.get(evidence_id, {})
-            kind = "Primary evidence" if index == 0 else "Supporting evidence"
-            evidence.append(f"<li>{kind}: {html.escape(str(evidence_id))}; Source file: {html.escape(str(fragment.get('source_file', 'missing')))}; Heading path: {html.escape(' / '.join(map(str, fragment.get('heading_path', []))))}<pre>{html.escape(str(fragment.get('content', '')))}</pre></li>")
+        for reference in references:
+            kind = "Primary evidence" if reference["role"] == "primary" else "Supporting evidence"
+            evidence.append(f"<li>{kind}: {html.escape(str(reference['evidence_id']))}; Source file: {html.escape(str(reference['source_file']))}; Heading path: {html.escape(' / '.join(map(str, reference['heading_path'])))}<pre>{html.escape(str(reference['content']))}</pre></li>")
         extraction = candidate["extraction"]
         assertion_events = [event for event in events if event.get("assertion_id") == candidate.get("id")]
         history = "".join(f"<li>Action: {html.escape(str(event['action']))}; Reviewer: {html.escape(str(event['reviewer']))}; Reviewed at: {html.escape(str(event['reviewed_at']))}; Note: {html.escape(str(event.get('note') or ''))}</li>" for event in assertion_events)
