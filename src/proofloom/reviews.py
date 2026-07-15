@@ -79,6 +79,41 @@ def replacement_assertions(events: list[dict[str, object]]) -> list[dict[str, ob
     return [event["replacement_assertion"] for event in sorted(events, key=lambda item: int(item["sequence"])) if isinstance(event.get("replacement_assertion"), dict)]
 
 
+def review_outcome_counts(
+    candidates: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, int]:
+    """Count current per-assertion review outcomes from the Assertion Ledger."""
+    assertion_ids = {
+        str(assertion["id"])
+        for assertion in [*candidates, *replacement_assertions(events)]
+        if isinstance(assertion.get("id"), str)
+    }
+    current_actions: dict[str, str] = {}
+    for event in sorted(events, key=lambda item: int(item["sequence"])):
+        assertion_id = str(event.get("assertion_id", ""))
+        if assertion_id not in assertion_ids or current_actions.get(assertion_id) == "replace":
+            continue
+        action = str(event.get("action", ""))
+        if action in {"accept", "reject", "replace", "needs_domain_review"}:
+            current_actions[assertion_id] = action
+    counts = {
+        "accepted": 0,
+        "rejected": 0,
+        "replaced": 0,
+        "needs_domain_review": 0,
+    }
+    outcome_by_action = {
+        "accept": "accepted",
+        "reject": "rejected",
+        "replace": "replaced",
+        "needs_domain_review": "needs_domain_review",
+    }
+    for action in current_actions.values():
+        counts[outcome_by_action[action]] += 1
+    return counts
+
+
 def resolve_assertion_evidence(
     assertion_id: str,
     candidates: list[dict[str, object]],

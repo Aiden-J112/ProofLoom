@@ -28,7 +28,7 @@ from proofloom.sources import (
     merge_source_fragments,
     write_source_fragments,
 )
-from proofloom.reviews import ReviewConflict, ReviewError, current_assertion_status, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review
+from proofloom.reviews import ReviewConflict, ReviewError, current_assertion_status, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review, review_outcome_counts
 from proofloom.graphs import GraphProjectionError, project_query_graph
 
 METADATA_DIRECTORY = ".proofloom"
@@ -194,6 +194,7 @@ def _graph_page(
         for edge in visible_edges
     )
     evidence_panel = _edge_evidence_panel(project_path, selected_assertion_id, visible_edges)
+    statistics_panel = _review_statistics_panel(project_path)
     return _page(
         '<h2>Graph Explorer</h2>'
         '<form method="get" action="/graph">'
@@ -201,9 +202,30 @@ def _graph_page(
         f'<label>Entity type <select name="entity_type">{"".join(entity_options)}</select></label>'
         f'<label>Relationship type <select name="relationship_type">{"".join(relationship_options)}</select></label>'
         '<button type="submit">Filter graph</button></form>'
+        f'{statistics_panel}'
         f'<h2>Entities</h2>{node_items or "<p>No matching entities.</p>"}'
         f'<h2>Relationships</h2>{edge_items or "<p>No matching relationships.</p>"}'
         f'{evidence_panel}'
+    )
+
+
+def _review_statistics_panel(project_path: Path) -> str:
+    try:
+        candidates = json.loads(_assertions_path(project_path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        candidates = []
+    except (OSError, json.JSONDecodeError) as error:
+        raise GraphProjectionError(f"Cannot read Candidate Assertions: {error}") from error
+    if not isinstance(candidates, list) or not all(isinstance(item, dict) for item in candidates):
+        raise GraphProjectionError("Stored Candidate Assertions must be a list of objects")
+    counts = review_outcome_counts(candidates, load_events(_review_events_path(project_path)))
+    return (
+        '<section id="review-outcomes"><h2>Review outcomes</h2><ul>'
+        f'<li>Accepted: {counts["accepted"]}</li>'
+        f'<li>Rejected: {counts["rejected"]}</li>'
+        f'<li>Replaced: {counts["replaced"]}</li>'
+        f'<li>Needs domain review: {counts["needs_domain_review"]}</li>'
+        '</ul></section>'
     )
 
 

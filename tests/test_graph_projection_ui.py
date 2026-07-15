@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.error
 import urllib.parse
 from pathlib import Path
 
@@ -9,14 +10,172 @@ from jsonschema import Draft202012Validator
 from proofloom.assertions import write_json_atomic
 from proofloom.entities import write_dictionary
 from proofloom.graphs import project_query_graph
-from proofloom.reviews import fold_status, load_events, review
+from proofloom.reviews import fold_status, load_events, review, review_outcome_counts
 
 from test_assertion_review_ui import candidate, create_review_project
 from test_fixture_extraction import dictionary, fragments
 from test_project_ui import RunningApplication, hidden_field, link_from, open_page, submit_form
+from test_source_import_ui import create_project
 
 
 class GraphProjectionUiTests(unittest.TestCase):
+    def test_fresh_project_graph_reports_zero_review_outcomes(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            project = root / "project"
+            project.mkdir()
+            with RunningApplication(root) as app:
+                project_page = create_project(app, project)
+                graph_page = submit_form(
+                    app,
+                    "/graphs/project",
+                    csrf_token=hidden_field(project_page, "csrf_token"),
+                    project=str(project),
+                ).read().decode()
+
+            self.assertIn("Graph Explorer", graph_page)
+            self.assertIn("Accepted: 0", graph_page)
+            self.assertIn("Rejected: 0", graph_page)
+            self.assertIn("Replaced: 0", graph_page)
+            self.assertIn("Needs domain review: 0", graph_page)
+
+    def test_graph_rejects_malformed_candidate_ledger_instead_of_treating_it_as_empty(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            project = root / "project"
+            project.mkdir()
+            with RunningApplication(root) as app:
+                project_page = create_project(app, project)
+                (project / ".proofloom" / "candidate-assertions.json").write_text(
+                    '{"not": "a list"}',
+                    encoding="utf-8",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    submit_form(
+                        app,
+                        "/graphs/project",
+                        csrf_token=hidden_field(project_page, "csrf_token"),
+                        project=str(project),
+                    ).read()
+
+                self.assertEqual(400, raised.exception.code)
+                self.assertIn(
+                    "Stored Candidate Assertions must be a list of objects",
+                    raised.exception.read().decode(),
+                )
+
+    def test_review_outcomes_count_each_ledgers_current_state_including_replacements(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            project = create_review_project(root)
+            metadata = project / ".proofloom"
+            candidates = [
+                candidate("ast_accepted_stale"),
+                candidate("ast_rejected"),
+                candidate("ast_domain_review"),
+                candidate("ast_replaced"),
+                candidate("ast_candidate_only"),
+            ]
+            events_path = metadata / "review-events"
+            review("accept", "ast_accepted_stale", candidates, events_path, dictionary(), fragments())
+            review("accept", "ast_rejected", candidates, events_path, dictionary(), fragments())
+            review("reject", "ast_rejected", candidates, events_path, dictionary(), fragments())
+            review("reject", "ast_domain_review", candidates, events_path, dictionary(), fragments())
+            review("needs_domain_review", "ast_domain_review", candidates, events_path, dictionary(), fragments())
+            replacement_event = review(
+                "replace",
+                "ast_replaced",
+                candidates,
+                events_path,
+                dictionary(),
+                fragments(),
+                {
+                    "subject_id": "entity_111111111111111111111111",
+                    "predicate": "PRODUCES",
+                    "object_id": "entity_222222222222222222222222",
+                },
+            )
+            review(
+                "accept",
+                str(replacement_event["replacement_assertion_id"]),
+                candidates,
+                events_path,
+                dictionary(),
+                fragments(),
+            )
+
+            self.assertEqual(
+                {
+                    "accepted": 2,
+                    "rejected": 1,
+                    "replaced": 1,
+                    "needs_domain_review": 1,
+                },
+                review_outcome_counts(candidates, load_events(events_path)),
+            )
+
+    def test_graph_filters_do_not_change_ledger_review_statistics(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            project = create_review_project(root)
+            metadata = project / ".proofloom"
+            stale_fragment = dict(
+                fragments()[0],
+                id="src_stale",
+                content="Synthetic evidence that has since changed.",
+                content_hash="sha256:stale",
+                status="changed",
+            )
+            source_fragments = [*fragments(), stale_fragment]
+            candidates = [
+                dict(candidate("ast_accepted_stale"), primary_evidence_id="src_stale"),
+                candidate("ast_rejected"),
+                candidate("ast_domain_review"),
+                candidate("ast_replaced"),
+                candidate("ast_candidate_only"),
+            ]
+            write_json_atomic(metadata / "source-fragments.json", source_fragments)
+            write_json_atomic(metadata / "candidate-assertions.json", candidates)
+            events_path = metadata / "review-events"
+            review("accept", "ast_accepted_stale", candidates, events_path, dictionary(), source_fragments)
+            review("reject", "ast_rejected", candidates, events_path, dictionary(), source_fragments)
+            review("needs_domain_review", "ast_domain_review", candidates, events_path, dictionary(), source_fragments)
+            replacement_event = review(
+                "replace",
+                "ast_replaced",
+                candidates,
+                events_path,
+                dictionary(),
+                source_fragments,
+                {
+                    "subject_id": "entity_111111111111111111111111",
+                    "predicate": "PRODUCES",
+                    "object_id": "entity_222222222222222222222222",
+                },
+            )
+            review(
+                "accept",
+                str(replacement_event["replacement_assertion_id"]),
+                candidates,
+                events_path,
+                dictionary(),
+                source_fragments,
+            )
+
+            with RunningApplication(root) as app:
+                page = open_page(
+                    app,
+                    f"/graph?project={urllib.parse.quote(str(project))}&relationship_type=BLOCKS",
+                )
+
+            self.assertIn("No matching relationships.", page)
+            self.assertIn("Review outcomes", page)
+            self.assertIn("Accepted: 2", page)
+            self.assertIn("Rejected: 1", page)
+            self.assertIn("Replaced: 1", page)
+            self.assertIn("Needs domain review: 1", page)
+            self.assertNotIn("Assertion ID: ast_accepted_stale", page)
+
     def test_owner_projects_an_accepted_assertion_to_a_deterministic_schema_valid_graph(self):
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
@@ -182,6 +341,17 @@ class GraphProjectionUiTests(unittest.TestCase):
                     evidence_page.index("The Inspector verifies the generated Report."),
                     evidence_page.index("A supporting synthetic passage."),
                 )
+
+                matching_relationship = open_page(
+                    app,
+                    f"/graph?project={urllib.parse.quote(str(project))}&relationship_type=VERIFIES",
+                )
+                filtered_evidence = open_page(
+                    app,
+                    link_from(matching_relationship, "Trace evidence for ast_review_original"),
+                )
+                self.assertIn("Assertion status: accepted", filtered_evidence)
+                self.assertIn("The Inspector verifies the generated Report.", filtered_evidence)
 
                 component_only = open_page(
                     app,
