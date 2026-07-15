@@ -18,6 +18,58 @@ from test_project_ui import RunningApplication, hidden_field, link_from, open_pa
 from test_source_import_ui import create_project
 
 
+def create_synthetic_review_statistics_project(
+    root: Path,
+) -> tuple[Path, list[dict[str, object]]]:
+    project = create_review_project(root)
+    metadata = project / ".proofloom"
+    stale_fragment = dict(
+        fragments()[0],
+        id="src_stale",
+        content="Synthetic evidence that has since changed.",
+        content_hash="sha256:stale",
+        status="changed",
+    )
+    source_fragments = [*fragments(), stale_fragment]
+    candidates = [
+        dict(candidate("ast_accepted_stale"), primary_evidence_id="src_stale"),
+        candidate("ast_rejected"),
+        candidate("ast_domain_review"),
+        candidate("ast_replaced"),
+        candidate("ast_candidate_only"),
+    ]
+    write_json_atomic(metadata / "source-fragments.json", source_fragments)
+    write_json_atomic(metadata / "candidate-assertions.json", candidates)
+    events_path = metadata / "review-events"
+    review("accept", "ast_accepted_stale", candidates, events_path, dictionary(), source_fragments)
+    review("accept", "ast_rejected", candidates, events_path, dictionary(), source_fragments)
+    review("reject", "ast_rejected", candidates, events_path, dictionary(), source_fragments)
+    review("reject", "ast_domain_review", candidates, events_path, dictionary(), source_fragments)
+    review("needs_domain_review", "ast_domain_review", candidates, events_path, dictionary(), source_fragments)
+    replacement_event = review(
+        "replace",
+        "ast_replaced",
+        candidates,
+        events_path,
+        dictionary(),
+        source_fragments,
+        {
+            "subject_id": "entity_111111111111111111111111",
+            "predicate": "PRODUCES",
+            "object_id": "entity_222222222222222222222222",
+        },
+    )
+    review(
+        "accept",
+        str(replacement_event["replacement_assertion_id"]),
+        candidates,
+        events_path,
+        dictionary(),
+        source_fragments,
+    )
+    return project, candidates
+
+
 class GraphProjectionUiTests(unittest.TestCase):
     def test_fresh_project_graph_reports_zero_review_outcomes(self):
         with tempfile.TemporaryDirectory() as root_name:
@@ -67,42 +119,8 @@ class GraphProjectionUiTests(unittest.TestCase):
     def test_review_outcomes_count_each_ledgers_current_state_including_replacements(self):
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
-            project = create_review_project(root)
+            project, candidates = create_synthetic_review_statistics_project(root)
             metadata = project / ".proofloom"
-            candidates = [
-                candidate("ast_accepted_stale"),
-                candidate("ast_rejected"),
-                candidate("ast_domain_review"),
-                candidate("ast_replaced"),
-                candidate("ast_candidate_only"),
-            ]
-            events_path = metadata / "review-events"
-            review("accept", "ast_accepted_stale", candidates, events_path, dictionary(), fragments())
-            review("accept", "ast_rejected", candidates, events_path, dictionary(), fragments())
-            review("reject", "ast_rejected", candidates, events_path, dictionary(), fragments())
-            review("reject", "ast_domain_review", candidates, events_path, dictionary(), fragments())
-            review("needs_domain_review", "ast_domain_review", candidates, events_path, dictionary(), fragments())
-            replacement_event = review(
-                "replace",
-                "ast_replaced",
-                candidates,
-                events_path,
-                dictionary(),
-                fragments(),
-                {
-                    "subject_id": "entity_111111111111111111111111",
-                    "predicate": "PRODUCES",
-                    "object_id": "entity_222222222222222222222222",
-                },
-            )
-            review(
-                "accept",
-                str(replacement_event["replacement_assertion_id"]),
-                candidates,
-                events_path,
-                dictionary(),
-                fragments(),
-            )
 
             self.assertEqual(
                 {
@@ -111,56 +129,16 @@ class GraphProjectionUiTests(unittest.TestCase):
                     "replaced": 1,
                     "needs_domain_review": 1,
                 },
-                review_outcome_counts(candidates, load_events(events_path)),
+                review_outcome_counts(
+                    candidates,
+                    load_events(metadata / "review-events"),
+                ),
             )
 
     def test_graph_filters_do_not_change_ledger_review_statistics(self):
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
-            project = create_review_project(root)
-            metadata = project / ".proofloom"
-            stale_fragment = dict(
-                fragments()[0],
-                id="src_stale",
-                content="Synthetic evidence that has since changed.",
-                content_hash="sha256:stale",
-                status="changed",
-            )
-            source_fragments = [*fragments(), stale_fragment]
-            candidates = [
-                dict(candidate("ast_accepted_stale"), primary_evidence_id="src_stale"),
-                candidate("ast_rejected"),
-                candidate("ast_domain_review"),
-                candidate("ast_replaced"),
-                candidate("ast_candidate_only"),
-            ]
-            write_json_atomic(metadata / "source-fragments.json", source_fragments)
-            write_json_atomic(metadata / "candidate-assertions.json", candidates)
-            events_path = metadata / "review-events"
-            review("accept", "ast_accepted_stale", candidates, events_path, dictionary(), source_fragments)
-            review("reject", "ast_rejected", candidates, events_path, dictionary(), source_fragments)
-            review("needs_domain_review", "ast_domain_review", candidates, events_path, dictionary(), source_fragments)
-            replacement_event = review(
-                "replace",
-                "ast_replaced",
-                candidates,
-                events_path,
-                dictionary(),
-                source_fragments,
-                {
-                    "subject_id": "entity_111111111111111111111111",
-                    "predicate": "PRODUCES",
-                    "object_id": "entity_222222222222222222222222",
-                },
-            )
-            review(
-                "accept",
-                str(replacement_event["replacement_assertion_id"]),
-                candidates,
-                events_path,
-                dictionary(),
-                source_fragments,
-            )
+            project, _ = create_synthetic_review_statistics_project(root)
 
             with RunningApplication(root) as app:
                 page = open_page(

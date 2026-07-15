@@ -23,6 +23,14 @@ Draft202012Validator.check_schema(_EVENT_SCHEMA)
 Draft202012Validator.check_schema(_CANDIDATE_SCHEMA)
 _EVENT_VALIDATOR = Draft202012Validator(_EVENT_SCHEMA, registry=_SCHEMA_REGISTRY, format_checker=FormatChecker())
 _EVENT_FILENAME = re.compile(r"^(?P<sequence>[0-9]{20})\.json$")
+_NONTERMINAL_OUTCOME_BY_ACTION = {
+    "accept": "accepted",
+    "reject": "rejected",
+    "needs_domain_review": "needs_domain_review",
+}
+_TERMINAL_REPLACE_ACTION = "replace"
+_TERMINAL_REPLACE_LEDGER_STATUS = "rejected"
+_TERMINAL_REPLACE_OUTCOME = "replaced"
 
 
 class ReviewError(ValueError):
@@ -89,28 +97,25 @@ def review_outcome_counts(
         for assertion in [*candidates, *replacement_assertions(events)]
         if isinstance(assertion.get("id"), str)
     }
-    current_actions: dict[str, str] = {}
+    current_outcomes: dict[str, str] = {}
     for event in sorted(events, key=lambda item: int(item["sequence"])):
         assertion_id = str(event.get("assertion_id", ""))
-        if assertion_id not in assertion_ids or current_actions.get(assertion_id) == "replace":
+        if assertion_id not in assertion_ids or current_outcomes.get(assertion_id) == _TERMINAL_REPLACE_OUTCOME:
             continue
         action = str(event.get("action", ""))
-        if action in {"accept", "reject", "replace", "needs_domain_review"}:
-            current_actions[assertion_id] = action
+        if action == _TERMINAL_REPLACE_ACTION:
+            current_outcomes[assertion_id] = _TERMINAL_REPLACE_OUTCOME
+        elif action in _NONTERMINAL_OUTCOME_BY_ACTION:
+            current_outcomes[assertion_id] = _NONTERMINAL_OUTCOME_BY_ACTION[action]
     counts = {
-        "accepted": 0,
-        "rejected": 0,
-        "replaced": 0,
-        "needs_domain_review": 0,
+        outcome: 0
+        for outcome in (
+            *_NONTERMINAL_OUTCOME_BY_ACTION.values(),
+            _TERMINAL_REPLACE_OUTCOME,
+        )
     }
-    outcome_by_action = {
-        "accept": "accepted",
-        "reject": "rejected",
-        "replace": "replaced",
-        "needs_domain_review": "needs_domain_review",
-    }
-    for action in current_actions.values():
-        counts[outcome_by_action[action]] += 1
+    for outcome in current_outcomes.values():
+        counts[outcome] += 1
     return counts
 
 
@@ -159,9 +164,9 @@ def fold_status(assertion_id: str, events: list[dict[str, object]]) -> str:
         if event.get("assertion_id") != assertion_id:
             continue
         action = event.get("action")
-        if action == "replace":
-            return "rejected"
-        status = {"accept": "accepted", "reject": "rejected", "needs_domain_review": "needs_domain_review"}.get(str(action), status)
+        if action == _TERMINAL_REPLACE_ACTION:
+            return _TERMINAL_REPLACE_LEDGER_STATUS
+        status = _NONTERMINAL_OUTCOME_BY_ACTION.get(str(action), status)
     return status
 
 
@@ -253,7 +258,7 @@ def review(
     note: str | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, object]:
-    if action not in {"accept", "reject", "replace", "needs_domain_review"}:
+    if action not in {*_NONTERMINAL_OUTCOME_BY_ACTION, _TERMINAL_REPLACE_ACTION}:
         raise ReviewError("action: choose accept, reject, replace, or needs_domain_review")
     events = load_events(events_directory)
     expected_prior_sequence = int(events[-1]["sequence"]) if events else 0
@@ -265,10 +270,10 @@ def review(
         validation = validate_candidates([original], dictionary, fragments)[0]
         if not validation["valid"]:
             raise ReviewError("; ".join(f"replacement_assertion.{item['field']}: {item['reason']}" for item in validation["reasons"]))
-    if any(event.get("assertion_id") == assertion_id and event.get("action") == "replace" for event in events):
+    if any(event.get("assertion_id") == assertion_id and event.get("action") == _TERMINAL_REPLACE_ACTION for event in events):
         raise ReviewConflict("assertion_id: replaced assertion is terminal")
     replacement = None
-    if action == "replace":
+    if action == _TERMINAL_REPLACE_ACTION:
         values = replacement_fields or {}
         semantic = {field: values.get(field, "").strip() for field in ("subject_id", "predicate", "object_id")}
         if not all(semantic.values()):
