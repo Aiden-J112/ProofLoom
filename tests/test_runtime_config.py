@@ -1,6 +1,7 @@
 import json
 import contextlib
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -108,6 +109,24 @@ class RuntimeConfigCliTests(unittest.TestCase):
 
 
 class CodexCliExtractionTests(unittest.TestCase):
+    def test_default_resolver_prefers_a_direct_platform_executable(self):
+        captured = {}
+
+        def runner(command, **kwargs):
+            captured["command"] = command
+            Path(command[command.index("-o") + 1]).write_text(
+                '{"candidates": []}', encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch("proofloom.assertions.shutil.which", return_value="resolved-codex-binary") as which:
+            CodexCliExtractor("gpt-5.6-luna", "medium", runner=runner).extract(
+                dictionary(), fragments()
+            )
+
+        which.assert_called_once_with("codex.exe" if os.name == "nt" else "codex")
+        self.assertEqual("resolved-codex-binary", captured["command"][0])
+
     def test_configured_codex_run_is_isolated_and_persists_candidate_only(self):
         captured = {}
 
@@ -121,7 +140,11 @@ class CodexCliExtractionTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout="ignored", stderr="ignored")
 
         extractor = CodexCliExtractor(
-            "gpt-5.6-luna", "medium", runner=runner, clock=lambda: NOW
+            "gpt-5.6-luna",
+            "medium",
+            runner=runner,
+            executable_resolver=lambda: r"C:\WindowsApps\codex.exe",
+            clock=lambda: NOW,
         )
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
@@ -139,7 +162,7 @@ class CodexCliExtractionTests(unittest.TestCase):
                 self.assertIn("provider=codex-cli", result)
 
             command = captured["command"]
-            self.assertEqual("codex", command[0])
+            self.assertEqual(r"C:\WindowsApps\codex.exe", command[0])
             self.assertEqual("exec", command[1])
             for flag in ("--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--strict-config", "--output-schema", "-o"):
                 self.assertIn(flag, command)
@@ -193,12 +216,29 @@ class CodexCliExtractionTests(unittest.TestCase):
         ]
         for runner, expected in cases:
             with self.subTest(expected=expected):
-                extractor = CodexCliExtractor("gpt-5.6-luna", "medium", runner=runner)
+                extractor = CodexCliExtractor(
+                    "gpt-5.6-luna",
+                    "medium",
+                    runner=runner,
+                    executable_resolver=lambda: "codex-test-binary",
+                )
                 with self.assertRaisesRegex(ValueError, expected) as caught:
                     extractor.extract(dictionary(), fragments())
                 message = str(caught.exception)
                 self.assertNotIn("top-secret-output", message)
                 self.assertNotIn("top-secret-error", message)
+
+    def test_missing_direct_executable_is_reported_without_starting_a_shell(self):
+        runner = mock.Mock()
+        extractor = CodexCliExtractor(
+            "gpt-5.6-luna",
+            "medium",
+            runner=runner,
+            executable_resolver=lambda: None,
+        )
+        with self.assertRaisesRegex(ValueError, "executable was not found"):
+            extractor.extract(dictionary(), fragments())
+        runner.assert_not_called()
 
 
 if __name__ == "__main__":

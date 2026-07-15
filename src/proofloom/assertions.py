@@ -5,6 +5,7 @@ import ipaddress
 import json
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -82,6 +83,11 @@ def _default_transport(http_request: request.Request, timeout: float) -> bytes:
     opener = request.build_opener(_NoRedirectHandler())
     with opener.open(http_request, timeout=timeout) as response:
         return response.read()
+
+
+def _resolve_codex_executable() -> str | None:
+    """Resolve a directly executable Codex binary without invoking a shell wrapper."""
+    return shutil.which("codex.exe" if os.name == "nt" else "codex")
 
 
 class OpenAICompatibleExtractor:
@@ -176,7 +182,7 @@ class OpenAICompatibleExtractor:
 class CodexCliExtractor:
     """Candidate-only adapter for an authenticated local Codex CLI."""
 
-    def __init__(self, model: str, reasoning: str, *, timeout: float = 120, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+    def __init__(self, model: str, reasoning: str, *, timeout: float = 120, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, executable_resolver: Callable[[], str | None] = _resolve_codex_executable, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if not all(isinstance(value, str) and value.strip() for value in (model, reasoning)):
             raise ExtractionError("Codex model and reasoning must be non-empty")
         if reasoning not in {"minimal", "low", "medium", "high", "xhigh"}:
@@ -187,9 +193,16 @@ class CodexCliExtractor:
         self.reasoning = reasoning
         self._timeout = timeout
         self._runner = runner
+        self._executable_resolver = executable_resolver
         self._clock = clock
 
     def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[object]:
+        try:
+            executable = self._executable_resolver()
+        except OSError:
+            executable = None
+        if not executable:
+            raise ExtractionError("Codex CLI executable was not found")
         prompt = (
             "Propose Candidate Assertions only; never accepted knowledge and never a Query Graph. "
             "Use only IDs from the supplied Entity Dictionary and Source Fragments. "
@@ -205,7 +218,7 @@ class CodexCliExtractor:
             output_path = isolated / "candidate-output.json"
             schema_path.write_text(json.dumps(_CODEX_OUTPUT_SCHEMA), encoding="utf-8")
             command = [
-                "codex", "exec", "--ephemeral", "--skip-git-repo-check",
+                executable, "exec", "--ephemeral", "--skip-git-repo-check",
                 "--ignore-user-config", "--ignore-rules", "--strict-config",
                 "--model", self.model,
                 "-c", f'model_reasoning_effort="{self.reasoning}"',
