@@ -1,7 +1,6 @@
 import json
 import contextlib
 import io
-import os
 import subprocess
 import tempfile
 import unittest
@@ -109,23 +108,46 @@ class RuntimeConfigCliTests(unittest.TestCase):
 
 
 class CodexCliExtractionTests(unittest.TestCase):
-    def test_default_resolver_prefers_a_direct_platform_executable(self):
+    def test_default_windows_resolver_derives_the_official_npm_native_binary(self):
+        architectures = [
+            ("AMD64", "codex-win32-x64", "x86_64-pc-windows-msvc"),
+            ("ARM64", "codex-win32-arm64", "aarch64-pc-windows-msvc"),
+        ]
+        for machine, package, target in architectures:
+            with self.subTest(machine=machine), tempfile.TemporaryDirectory() as root_name:
+                npm = Path(root_name) / "npm"
+                npm.mkdir()
+                wrapper = npm / "codex.cmd"
+                wrapper.write_text("wrapper contents must not be inspected", encoding="utf-8")
+                native = npm / "node_modules" / "@openai" / "codex" / "node_modules" / "@openai" / package / "vendor" / target / "bin" / "codex.exe"
+                native.parent.mkdir(parents=True)
+                native.write_bytes(b"native-placeholder")
+                captured = {}
+
+                def runner(command, **kwargs):
+                    captured["command"] = command
+                    Path(command[command.index("-o") + 1]).write_text('{"candidates": []}', encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0)
+
+                with mock.patch("proofloom.assertions.sys.platform", "win32"), mock.patch("proofloom.assertions.platform.machine", return_value=machine), mock.patch("proofloom.assertions.shutil.which", side_effect=lambda name: str(wrapper) if name == "codex.cmd" else None) as which:
+                    CodexCliExtractor("gpt-5.6-luna", "medium", runner=runner).extract(dictionary(), fragments())
+
+                which.assert_called_once_with("codex.cmd")
+                self.assertEqual(str(native.resolve()), captured["command"][0])
+
+    def test_default_non_windows_resolver_uses_the_direct_path_binary(self):
         captured = {}
 
         def runner(command, **kwargs):
             captured["command"] = command
-            Path(command[command.index("-o") + 1]).write_text(
-                '{"candidates": []}', encoding="utf-8"
-            )
+            Path(command[command.index("-o") + 1]).write_text('{"candidates": []}', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
 
-        with mock.patch("proofloom.assertions.shutil.which", return_value="resolved-codex-binary") as which:
-            CodexCliExtractor("gpt-5.6-luna", "medium", runner=runner).extract(
-                dictionary(), fragments()
-            )
+        with mock.patch("proofloom.assertions.sys.platform", "linux"), mock.patch("proofloom.assertions.shutil.which", return_value="/usr/bin/codex") as which:
+            CodexCliExtractor("gpt-5.6-luna", "medium", runner=runner).extract(dictionary(), fragments())
 
-        which.assert_called_once_with("codex.exe" if os.name == "nt" else "codex")
-        self.assertEqual("resolved-codex-binary", captured["command"][0])
+        which.assert_called_once_with("codex")
+        self.assertEqual("/usr/bin/codex", captured["command"][0])
 
     def test_configured_codex_run_is_isolated_and_persists_candidate_only(self):
         captured = {}

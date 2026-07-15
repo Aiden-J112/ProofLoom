@@ -5,8 +5,10 @@ import ipaddress
 import json
 import math
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from importlib.resources import files
@@ -87,7 +89,26 @@ def _default_transport(http_request: request.Request, timeout: float) -> bytes:
 
 def _resolve_codex_executable() -> str | None:
     """Resolve a directly executable Codex binary without invoking a shell wrapper."""
-    return shutil.which("codex.exe" if os.name == "nt" else "codex")
+    if sys.platform != "win32":
+        return shutil.which("codex")
+    wrapper = shutil.which("codex.cmd") or shutil.which("codex")
+    if not wrapper:
+        return None
+    machine = platform.machine().casefold()
+    if machine in {"amd64", "x86_64"}:
+        package, target = "codex-win32-x64", "x86_64-pc-windows-msvc"
+    elif machine in {"arm64", "aarch64"}:
+        package, target = "codex-win32-arm64", "aarch64-pc-windows-msvc"
+    else:
+        return None
+    candidate = (
+        Path(wrapper).resolve().parent
+        / "node_modules" / "@openai" / "codex" / "node_modules"
+        / "@openai" / package / "vendor" / target / "bin" / "codex.exe"
+    )
+    if candidate.suffix.casefold() != ".exe" or candidate.is_symlink() or not candidate.is_file():
+        return None
+    return str(candidate.resolve())
 
 
 class OpenAICompatibleExtractor:
