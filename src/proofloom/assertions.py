@@ -299,7 +299,7 @@ def write_extraction_results(
         raise
 
 
-_ASSERTION_PROPOSAL_FIELDS = (
+_EXTRACTION_RESULT_FIELDS = (
     "subject_id",
     "predicate",
     "object_id",
@@ -307,6 +307,7 @@ _ASSERTION_PROPOSAL_FIELDS = (
     "supporting_evidence_ids",
     "status",
     "replaces_assertion_id",
+    "extraction",
 )
 
 
@@ -337,12 +338,12 @@ def prepare_extracted_candidates(
         if collision is None:
             prepared.append(item)
             continue
-        if _same_proposal(collision, item):
+        if _same_extraction_result(collision, item):
             prepared.append(collision)
             continue
         base_id = str(item["id"])
         payload = json.dumps(
-            {field: item.get(field) for field in _ASSERTION_PROPOSAL_FIELDS},
+            {field: item.get(field) for field in _EXTRACTION_RESULT_FIELDS},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -358,7 +359,7 @@ def prepare_extracted_candidates(
                 by_id[fresh_id] = rekeyed
                 prepared.append(rekeyed)
                 break
-            if _same_proposal(prior, rekeyed):
+            if _same_extraction_result(prior, rekeyed):
                 prepared.append(prior)
                 break
             attempt += 1
@@ -379,8 +380,8 @@ def append_new_candidates(
     return merged
 
 
-def _same_proposal(left: dict[str, object], right: dict[str, object]) -> bool:
-    return all(left.get(field) == right.get(field) for field in _ASSERTION_PROPOSAL_FIELDS)
+def _same_extraction_result(left: dict[str, object], right: dict[str, object]) -> bool:
+    return all(left.get(field) == right.get(field) for field in _EXTRACTION_RESULT_FIELDS)
 
 
 def _read_json_or_missing(path: Path, missing: object) -> object:

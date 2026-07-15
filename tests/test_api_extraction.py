@@ -180,6 +180,63 @@ class ApiExtractionTests(unittest.TestCase):
             self.assertFalse((project / ".proofloom" / "query-graph.json").exists())
             self.assertNotIn("secret", "".join(path.read_text(errors="ignore") for path in project.rglob("*") if path.is_file()))
 
+    def test_persisted_ledger_keeps_distinct_provenance_for_the_same_proposal(self):
+        with tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "project"; project.mkdir()
+            running = RunningApplication(Path(root))
+            first_extractor = OpenAICompatibleExtractor(
+                "https://first.invalid/chat/completions",
+                "first-model",
+                "first-secret",
+                provider="first-provider",
+                transport=lambda *_: response(),
+                clock=lambda: NOW,
+            )
+            second_extractor = OpenAICompatibleExtractor(
+                "https://second.invalid/chat/completions",
+                "second-model",
+                "second-secret",
+                provider="second-provider",
+                transport=lambda *_: response(),
+                clock=lambda: datetime(2026, 1, 2, 4, 5, 6, tzinfo=timezone.utc),
+            )
+            running.server.api_extractor = first_extractor
+            with running as app:
+                home = open_page(app, "/")
+                submit_form(app, "/projects/create", csrf_token=hidden_field(home, "csrf_token"), directory=str(project), name="Provenance Project").read()
+                write_dictionary(project / ".proofloom" / "entity-dictionary.json", dictionary())
+                (project / ".proofloom" / "source-fragments.json").write_text(json.dumps(fragments()), encoding="utf-8")
+                page = open_page(app, f"/assertions?project={project}")
+                submit_form(app, "/assertions/extract-api", csrf_token=hidden_field(page, "csrf_token"), project=str(project)).read()
+
+                running.server.api_extractor = second_extractor
+                page = open_page(app, f"/assertions?project={project}")
+                submit_form(app, "/assertions/extract-api", csrf_token=hidden_field(page, "csrf_token"), project=str(project)).read()
+                page = open_page(app, f"/assertions?project={project}")
+                submit_form(app, "/assertions/extract-api", csrf_token=hidden_field(page, "csrf_token"), project=str(project)).read()
+
+            persisted = json.loads((project / ".proofloom" / "candidate-assertions.json").read_text())
+            self.assertEqual(2, len(persisted))
+            self.assertNotEqual(persisted[0]["id"], persisted[1]["id"])
+            assertion_fields = (
+                "subject_id", "predicate", "object_id", "primary_evidence_id",
+                "supporting_evidence_ids", "status",
+            )
+            self.assertEqual(
+                {field: persisted[0][field] for field in assertion_fields},
+                {field: persisted[1][field] for field in assertion_fields},
+            )
+            self.assertEqual({
+                "provider": "first-provider", "model": "first-model",
+                "prompt_version": "1", "schema_version": "1",
+                "generated_at": "2026-01-02T03:04:05Z", "mode": "api",
+            }, persisted[0]["extraction"])
+            self.assertEqual({
+                "provider": "second-provider", "model": "second-model",
+                "prompt_version": "1", "schema_version": "1",
+                "generated_at": "2026-01-02T04:05:06Z", "mode": "api",
+            }, persisted[1]["extraction"])
+
     def test_custom_endpoint_environment_and_endpoint_safety_rules(self):
         env = {
             "PROOFLOOM_OPENAI_ENDPOINT": "https://provider.invalid/api/chat/completions",
