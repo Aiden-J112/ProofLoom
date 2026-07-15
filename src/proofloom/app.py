@@ -5,6 +5,7 @@ import html
 import ipaddress
 import json
 import secrets
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,7 @@ from proofloom.sources import (
 )
 from proofloom.reviews import ReviewConflict, ReviewError, current_assertion_status, fold_status, load_events, replacement_assertions, resolve_assertion_evidence, review, review_outcome_counts
 from proofloom.graphs import GraphProjectionError, project_query_graph
+from proofloom.release import ReleaseIntegrityError, check_project_integrity
 
 METADATA_DIRECTORY = ".proofloom"
 METADATA_FILE = "project.json"
@@ -860,10 +862,26 @@ def create_server(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local ProofLoom interface")
+    parser.add_argument("command", nargs="?", choices=("serve", "check"), default="serve")
+    parser.add_argument("project", nargs="?", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--browse-root", type=Path, default=Path.home())
     args = parser.parse_args()
+    if args.command == "check":
+        if args.project is None:
+            parser.error("check requires a Knowledge Project path")
+        try:
+            result = check_project_integrity(args.project)
+        except ReleaseIntegrityError as error:
+            print(f"Release integrity failed: {error}", file=sys.stderr)
+            raise SystemExit(1) from None
+        count = result["checked_edges"]
+        noun = "edge" if count == 1 else "edges"
+        print(f"Release integrity passed: {count} graph {noun} checked")
+        return
+    if args.project is not None:
+        parser.error("serve does not accept a project path")
     server = create_server(args.host, args.port, browse_root=args.browse_root)
     print(f"ProofLoom is available at http://{args.host}:{server.server_port}")
     try:

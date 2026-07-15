@@ -10,5 +10,29 @@
     "source_file": "synthetic-signal.md",
     "heading_path": ["Signal lesson"],
     "ordinal": 1
-  }
+  },
+  "additional_recipes": [
+    {
+      "model": "synthetic-workflow-v1",
+      "predicate": "VERIFIES",
+      "subject_name": "Inspector",
+      "object_name": "Inspection Report",
+      "evidence": {
+        "source_file": "examples/synthetic-workflow/inspection.md",
+        "heading_path": ["Inspection workflow"],
+        "ordinal": 1
+      }
+    },
+    {
+      "model": "synthetic-workflow-v1",
+      "predicate": "BLOCKS",
+      "subject_name": "Safety Gate",
+      "object_name": "Risky Command",
+      "evidence": {
+        "source_file": "examples/synthetic-workflow/safety.md",
+        "heading_path": ["Safety workflow"],
+        "ordinal": 1
+      }
+    }
+  ]
 }

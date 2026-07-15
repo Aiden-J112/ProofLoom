@@ -6,5 +6,10 @@ AGENTS.md
 
 # Local scratch material and generated Python caches.
 .scratch/
+.venv/
+demo-project/
+build/
+dist/
+*.egg-info/
 __pycache__/
 *.py[cod]

@@ -1,290 +1,185 @@
-# Harness 学习 Agent 知识图谱：技术路线与项目价值
+# ProofLoom
 
-> 开源项目工作名称：**ProofLoom**  
-> 副标题：**Evidence-grounded AI learning workspace**
+ProofLoom is a local-first, evidence-grounded AI learning workspace. It turns
+trusted Markdown into a human-reviewed Query Graph whose relationships trace
+back to located Source Fragments.
 
-`Proof` 强调每条知识关系的证据基础，`Loom` 表达将零散资料、概念、关系和学习活动编织成可探索结构的过程。该名称不绑定图数据库，也不将产品局限为单一 Agent。正式对外发布前还需完成商标、GitHub 组织/仓库名和软件包名可用性检查。
+ProofLoom v0.1 provides the complete Build workflow and a lightweight Explore
+workflow. The Assertion Ledger and its Review Events are authoritative; the
+Query Graph is a projection containing only current accepted assertions.
 
-## 1. 一句话说明我们在做什么
+## Requirements
 
-我们希望构建一个**本地优先、证据驱动的 AI 学习工作台**：用户导入一组可信资料，系统协助构建“每条关系都可以回到原文、每次修改都留有记录”的知识图谱，并在此基础上完成探索、问答、测验和复习。
+- Python 3.11 or newer
+- A local web browser
 
-产品不被定义为一个单独 Agent。问答 Agent、出题 Agent、评分 Agent 和修订 Agent 都是工作台内部的可组合能力。这样即使未来 Agent 的实现方式发生变化，产品的核心价值——可信知识构建与可解释学习闭环——仍然成立。
+The bundled synthetic workflow uses no network service and requires no API key.
 
-当前阶段聚焦于把知识图谱的最小闭环跑通，不提前扩张教学功能。
+## Install and start from a clean checkout
 
-### 1.1 工作台的三个连续空间
+PowerShell or Command Prompt (the first command assumes `python` is Python 3.11+):
 
-```text
-构建 Build
-导入资料 → 抽取候选知识 → 人工审核 → 形成可信图谱
-
-探索 Explore
-查看图谱 → 点击关系查看原文 → 基于图谱进行可溯源问答
-
-学习 Learn
-选择主题 → 生成测验 → 作答与评分 → 针对薄弱关系复习
+```console
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install .
+.venv\Scripts\python.exe -m proofloom.app --browse-root .
 ```
 
-首版面向“资料整理者与学习者是同一个人”的个人用户。用户在本机建立一个 `Knowledge Project`，导入自己信任的 Markdown 资料、审核关键知识，再使用它学习。首版不引入教师、学生和管理员等多角色权限系统。
+POSIX shells:
 
-### 1.2 开源项目定位
-
-> Turn trusted documents into a reviewable knowledge graph, then learn from it through grounded Q&A and adaptive quizzes.
-
-> 将可信资料转化为可审核、可溯源的知识图谱，并通过问答与测验帮助用户学习和巩固知识。
-
-对普通用户，它是一个本地 Web 学习工作台；对开源开发者，它同时提供可单独使用的解析、断言账本、模型适配和图投影边界。
-
-## 2. 这个项目解决的不只是“把文档画成图”
-
-普通的 LLM 摘要或问答可以很快给出结论，但常常难以稳定回答三个问题：
-
-1. 这个结论来自哪个文件、哪个标题和哪个段落？
-2. 这条关系是原文明确表达的，还是模型自己推测的？
-3. 如果模型抽取错了，我们如何修正，并知道它为什么经常出错？
-
-本项目的核心价值，是把 LLM 的语义能力放进一条可校验、可审核、可追溯的工程流程里，而不是直接相信模型生成的节点和连线。
-
-## 3. 总体技术路线
-
-```text
-原始 Markdown
-  → 程序按标题、自然段、列表和代码块切分
-  → 生成可稳定定位的来源片段
-  → LLM 生成候选实体和候选断言
-  → 程序校验 JSON Schema、实体词典和关系词表
-  → 人工接受、拒绝或修正候选断言
-  → 断言账本保留证据和审核历史
-  → 只把已接受断言投影为 JSON 查询图
-  → 后续可以使用同一数据投影到 Neo4j
+```console
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/python -m proofloom.app --browse-root .
 ```
 
-这条路线将“理解文档”和“决定什么是可信知识”分开：LLM 负责理解和提案，程序负责结构和约束，人负责最终决策。
+Open `http://127.0.0.1:8000`. Stop the server with `Ctrl+C`.
 
-## 4. 技术栈
+The corresponding installed console commands are
+`.venv\Scripts\proofloom.exe --browse-root .` on Windows and
+`.venv/bin/proofloom --browse-root .` on POSIX.
 
-### 4.1 首版建议
+When ProofLoom is already installed and its scripts directory is on `PATH`, the
+short equivalent is:
 
-| 层次 | 技术/形式 | 用途 |
-| --- | --- | --- |
-| 原始资料 | Markdown | 作为权威来源 |
-| 处理程序 | Python 3.12 | Markdown 解析、Schema 校验、投影与命令行工具 |
-| 数据合同 | JSON Schema | 约束实体、来源片段、断言和审核事件 |
-| 权威记录 | JSON/JSONL | 保存实体词典、断言账本和追加式审核历史 |
-| LLM 接入 | OpenAI-compatible HTTP API | 首批默认 OpenAI，可切换 DeepSeek 等外部模型 |
-| 离线模式 | FixtureExtractor | 无 API key 时使用 Luna 或其他模型预生成的固定候选数据 |
-| 审核界面 | 本地 Web 页面 | 对候选断言接受、拒绝或修正 |
-| 首版查询图 | JSON Graph | 快速跑通闭环，降低环境准备成本 |
-| 后续图存储 | Neo4j | 承载更丰富的遍历、图查询和可视化 |
-
-### 4.2 为什么不第一天就把所有内容写入 Neo4j
-
-Neo4j 擅长查询已经成立的图关系，但不自动解决断言的证据、审核、拒绝和版本问题。如果一开始就把 LLM 输出当作图边写入 Neo4j，图谱可能很快“看起来丰富”，却很难说清每条边为什么存在。
-
-因此，我们先建立存放完整证据和治理信息的“断言账本”，再把通过审核的部分投影为易于查询的图。这样既保留了图数据库的优势，也避免让它承担不擅长的知识治理职责。
-
-## 5. 几个“小巧思”与背后的技术深度
-
-### 5.1 来源是权威，图谱是可审核主张的投影
-
-我们不把“模型说过”等同于“领域事实”。权威仍然来自原始 Markdown；图谱里的每个节点和关系，都是经过证据绑定和人工审核的结构化主张。
-
-这个设计让系统在面对模型幻觉时不是仅靠“更好的提示词”，而是依靠明确的权威边界。
-
-### 5.2 人不写 JSON，人只做知识决策
-
-用户不需要理解底层 JSON 结构，只需在审核界面中看到：
-
-- LLM 提议了什么关系；
-- 它引用了哪一段原文；
-- 是接受、拒绝，还是修正实体或关系。
-
-这个边界把人的注意力留给语义和责任判断，把格式维护交给程序。
-
-### 5.3 封闭实体词典，先求稳定再求开放
-
-首版不允许 LLM 随意创建正式节点。已知实体通过稳定 ID、规范名称和别名进行管理；新概念只能进入候选队列。
-
-对首批约十篇核心文档而言，这种限制能显著减少重复节点、别名分裂和错误合并。后续开放新实体发现时，也不需要推翻已有 ID 体系。
-
-### 5.4 结构感知切片，而不是机械切 Token
-
-原文按标题、自然段、列表和代码块切分。这使证据片段更符合人的阅读方式，也避免把完整列表或代码示例拦腰切断。
-
-每条断言必须有一个主要证据片段，同时可以带多个辅助片段。这既防止用整篇文章作为模糊引用，也能表达“一条关系需要上下文共同证明”的情况。
-
-### 5.5 审核采用追加事件，不静默改写历史
-
-当 LLM 把 `Verifier -[BLOCKS]-> Tool Action` 提交为候选关系，人工将它修正为 `Safety -[BLOCKS]-> Tool Action` 时，系统不直接覆盖原 JSON，而是追加一条“修正”审核事件。
-
-这确实比直接改写 JSON 多一点结构，但它保留了非常有价值的信息：
-
-- 模型最初生成了什么；
-- 人工改了哪些字段；
-- 哪些实体或关系最容易被混淆；
-- 更换模型或提示词后，抽取质量是否真正提升。
-
-因此，审核历史不只是审计记录，也是后续优化 LLM 的评测数据。首批两篇文档的全量人工审核结果，将自然形成一份黄金数据集。
-
-还需区分“修订”和“替代”：如果只是补充证据或说明，可以保留原断言 ID；如果主体、关系或客体发生变化，就应当拒绝原断言并创建带有 `replaces_assertion_id` 的新断言。一条从 `Verifier -[BLOCKS]-> Tool Action` 改成 `Safety -[BLOCKS]-> Tool Action` 的关系，不是字段微调，而是对原始主张的语义否定。保留这个差异，才能真实评估模型是否混淆了组件职责。
-
-### 5.6 无 API key 也能完整演示
-
-真实 API 调用与 fixture 使用同一份输出合同。因此在没有 API key、外部服务暂时不可用，或需要稳定现场演示时，仍然可以用 Luna 等模型预先生成的 fixture 跑完整条流程。
-
-这不是伪造在线抽取：fixture 会如实标注生成模型、提示词版本、Schema 版本和生成时间。它的价值是把“外部模型是否可访问”与“本地系统是否能工作”解耦。
-
-### 5.7 先做两篇垂直切片，不用十篇文档掩盖系统问题
-
-首个切片只处理 Verifier 和 Safety 两篇文档。这两个组件职责相关但不相同，很适合检验模型是否会把“验证输出”与“阻止危险动作”混为一谈。
-
-小范围能够让我们快速判断问题究竟出在文档切片、实体词典、抽取提示词、Schema 约束还是审核交互，而不是一开始就在大量数据中排查问题。
-
-## 6. 第一阶段的最小数据模型
-
-### 6.1 实体
-
-```text
-Entity
-├── Component
-├── Artifact
-├── Pattern
-└── Concept
+```console
+proofloom --browse-root .
 ```
 
-实体由封闭词典管理，使用不随显示名称变化的稳定 ID。
+ProofLoom binds only to a loopback address. `--browse-root` limits every project
+and source path available to the local interface. Use `--port PORT` to select a
+different port.
 
-### 6.2 首版关系
+For editable development installs, use `python -m pip install -e .`.
+
+## Run the original two-document synthetic workflow
+
+The repository includes two small original documents in
+`examples/synthetic-workflow/` and matching offline extraction recipes in the
+installed package data. The workflow is deterministic apart from generated
+local IDs and timestamps.
+
+1. Create an empty `demo-project` directory beneath the checkout.
+2. Start ProofLoom with the venv interpreter command from the install section:
+   `.venv\Scripts\python.exe -m proofloom.app --browse-root .` on Windows or
+   `.venv/bin/python -m proofloom.app --browse-root .` on POSIX.
+3. In **Create a Knowledge Project**, choose `demo-project`, name it, and create
+   the project.
+4. Import the `examples/synthetic-workflow` directory. The project page displays
+   located Source Fragments from both `inspection.md` and `safety.md`.
+5. Open **Review Entity Dictionary**. Submit and accept these controlled entities:
+
+   | Name | Type |
+   | --- | --- |
+   | Inspector | Component |
+   | Inspection Report | Artifact |
+   | Safety Gate | Component |
+   | Risky Command | Artifact |
+
+6. Open **Extract Candidate Assertions** and select **Run offline synthetic
+   fixture extraction**. Both candidates must show `valid` in Validation output.
+7. Read each proposed relationship beside its evidence, then select **Accept**
+   for both candidates.
+8. Select **Project and explore graph**. Explore the two relationships and use
+   each **Trace evidence** link to view its Assertion ID, accepted status, source
+   file, heading path, and original passage.
+9. In another terminal, run the public release-integrity check:
+
+   ```console
+   .venv\Scripts\python.exe -m proofloom.app check demo-project
+   ```
+
+   On POSIX use `.venv/bin/python -m proofloom.app check demo-project`. The
+   installed entry points are `.venv\Scripts\proofloom.exe check demo-project`
+   on Windows and `.venv/bin/proofloom check demo-project` on POSIX.
+
+The project writes governed local state beneath `demo-project/.proofloom/` and
+adds `.proofloom/` to that project's `.gitignore`. Generated Knowledge Project
+data is user-local and is not part of the repository.
+
+## Interface flow
+
+Build:
 
 ```text
-COMPOSED_OF
-PROMPTS
-CALLS_TOOL
-PRODUCES
-VERIFIES
-BLOCKS
+Create/open Knowledge Project
+  -> import UTF-8 Markdown
+  -> review the closed Entity Dictionary
+  -> extract candidates with fixture or configured API
+  -> inspect validation and located evidence
+  -> accept, reject, replace, or mark needs domain review
+  -> project the Query Graph
 ```
 
-这六种关系已足以表达 Harness 核心组件的输入、调用、产出、验证和安全控制链路。抽象的 `SUPPORTS`、`CONTRADICTS` 等关系暂不加入，避免在第一版扩大语义判断范围。
-
-### 6.3 教学模型的后续扩展
-
-第一阶段不构建 `Question` 和 `RubricItem`，但现有的 `entity_id`、`assertion_id` 和 `source_fragment_id` 会保持稳定。后续教学模型可以直接引用它们：
+Explore:
 
 ```text
-Question → assesses_entity_id / assesses_assertion_id
-RubricItem → required_assertion_id / evidence_fragment_id
+Filter entities/relationships
+  -> select a displayed edge
+  -> resolve assertion_id through the Assertion Ledger
+  -> inspect the current accepted state and Source Fragment passage
 ```
 
-因此，暂缓教学功能不会导致后续重搭知识图谱，只是在稳定知识模型上追加新的应用数据。
+Changing an imported passage marks its old Source Fragment `changed`. An
+accepted assertion referencing changed or missing evidence becomes `stale` and
+is withdrawn from the next Query Graph projection. Rejected, replaced,
+unreviewed, and `needs_domain_review` assertions are also excluded.
 
-## 7. 可量化的价值
+## Release-integrity command
 
-### 7.1 对当前 Demo
-
-- 展示图上的关系可以回到原文具体片段；
-- 展示 LLM 提案与人工决策之间的边界；
-- 展示 Verifier 与 Safety 职责混淆如何被发现和修正；
-- 展示无 API key 时仍能运行的稳定闭环。
-
-### 7.2 对后续产品化
-
-- **可信性**：结论不再只是模型输出，而是有可定位证据的已审核断言；
-- **可解释性**：问答、出题和评分可以引用同一组节点、关系和原文；
-- **可评估性**：人工审核数据可计算候选断言接受率、修正率和典型错误类型；
-- **可迁移性**：模型接口、断言账本和图投影相互解耦，可更换模型或图数据库；
-- **可运营性**：审核数据会不断沉淀为词典优化、提示词改进和模型选型的依据。
-
-## 8. 分阶段推进
-
-### 阶段一：两篇文档跑通闭环
-
-处理 `05-08-verifier.md` 和 `05-09-safety.md`，完成文档切片、实体词典、LLM/fixture 抽取、Schema 校验、全量人工审核、JSON 图投影和证据回溯。
-
-该阶段同时定义开源 `v0.1` 的产品边界：
-
-```text
-Build（完整交付）
-导入 Markdown、结构化切片、LLM/fixture 抽取、实体词典、
-人工审核、断言账本、JSON 图投影
-
-Explore（轻量交付）
-图谱可视化、点击关系查看原文证据
+```console
+proofloom check PROJECT_PATH
 ```
 
-`v0.1` 不将正式问答 Agent、出题 Agent、评分 Agent、学习记录、Neo4j 强制依赖和多用户权限系统作为发布门槛。这些能力在路线图中保留，但不影响第一个小而完整的开源版本交付。
+The command checks the persisted graph that users can explore. It does not trust
+edge fields as proof. For every edge, it independently verifies that:
 
-### 阶段二：扩展到核心机制章节
+- `assertion_id` resolves exactly once in the Assertion Ledger;
+- Review Events currently make that assertion accepted, not rejected, replaced,
+  stale, or awaiting domain review;
+- the assertion still passes schema, dictionary, predicate, and evidence checks;
+- the edge endpoints and relationship match the governed assertion; and
+- every primary and supporting Evidence Reference resolves to a located current
+  Source Fragment with a source file, heading path, and passage.
 
-将同一流水线扩展到约十篇核心文档，完善实体词典，统计不同模型和提示词版本的抽取质量。
+The command exits non-zero and identifies the failing edge when integrity is not
+established. Project the graph in the UI before running it.
 
-### 阶段三：Neo4j 投影与图查询
+## Optional OpenAI-compatible extraction
 
-将已接受断言投影到 Neo4j，增加一跳/两跳关系查询和子图检索，不改变断言账本的权威地位。
-
-### 阶段四：图谱驱动的学习功能
-
-在稳定知识层上追加问答、题目、评分量规和修订复评，不将学习记录反向写入权威知识图谱。
-
-## 9. 首个垂直切片的建议验收标准
-
-- 两篇 Markdown 可被稳定解析，重复运行生成相同来源片段 ID；
-- 每条候选断言都通过 Schema、实体词典和关系词表校验；
-- 每条候选断言都完成人工审核；
-- 每条已接受断言至少有一个可定位的主要证据片段；
-- JSON 查询图中不出现未审核或已拒绝断言；
-- 人工无法确定的候选可标记为 `needs_domain_review`，不被迫归入接受或拒绝；
-- 点击或查看任意图关系时，可通过 `assertion_id` 返回原始断言和来源片段；
-- 无 API key 时，fixture 模式仍可完成全部校验、审核和投影流程；
-- 系统可统计模型候选断言的接受、拒绝和修正数量。
-
-## 10. 风险与控制
-
-| 风险 | 控制方式 |
-| --- | --- |
-| LLM 生成错误关系 | 候选状态、Schema 校验和全量人工审核 |
-| 实体别名导致重复节点 | 封闭实体词典和稳定 ID |
-| 证据过于宽泛 | 结构感知切片和一主多辅证据约束 |
-| 审核修改无法追踪 | 追加式 Review Event，不静默覆盖原始候选 |
-| 原文更新后图谱静默过期 | 来源片段内容哈希检测，关联断言标记失效并移出查询图 |
-| 在线 API 不稳定 | 同合同的 fixture 离线模式 |
-| 过早追求大而全 | 先做 Verifier + Safety 两篇垂直切片 |
-| 后续教学功能要求重搭 | 现阶段稳定三类 ID，后续教学对象仅做引用和追加 |
-| 教程原文的公开授权不明确 | 开源代码与用户本地资料分离；获得明确许可前不随仓库发布原文 |
-
-## 11. 向管理者汇报时可以强调的重点
-
-1. **不是又一个只能看的图谱 Demo**：每条边都有证据和审核记录，可以直接服务于问答和后续教学任务。
-2. **不把 LLM 当作不会犯错的数据库**：模型负责提高抽取效率，知识权威仍由原文和审核流程保证。
-3. **先用最小成本证明核心价值**：两篇文档和 JSON 图即可验证从来源到图的闭环，后续再接 Neo4j 和教学功能。
-4. **每一次人工审核都在增加长期资产**：审核数据不仅修正当前图谱，还可以评测模型、优化提示词和完善实体词典。
-5. **技术路线保留可替换性**：不绑定单一 LLM，不让 Neo4j 成为唯一事实存储，不依赖现场网络才能演示。
-6. **Agent 是工作台的能力，不是对产品的全部定义**：问答、出题、评分和修订 Agent 可以独立演进，但共同服务于同一个有证据基础的学习过程。
-
-## 12. 当前状态
-
-已确定的方向包括：来源权威原则、断言账本与查询图分层、封闭实体词典、最小知识 Schema、六种首版关系、Verifier + Safety 垂直切片、JSON 首版投影、结构感知切片、OpenAI-compatible + fixture 双入口，以及追加式人工审核。
-
-已进一步确定断言修订与替代的语义，以及来源内容变化后的哈希检测、断言失效和重新审核策略。在进入实现前，还需明确人工审核的责任人与判断标准、审核界面的必要交互，以及首个切片的具体验收数据。
-
-### 12.1 开源资料边界
-
-当前 Harness 教程来自另一个 GitHub 开源项目，但本地教程目录中未发现明确的 `LICENSE`、`COPYING` 或 `NOTICE` 文件，README 也未声明内容再发布许可。因此已确定：开源仓库只发布程序、Schema、提示词和原创或合成的测试 fixture；不提交完整 Harness 教程、教程原文片段或从原文直接派生的可替代内容。完整教程仅作为内部 Demo 和用户本地运行时的外部输入。
-
-# Configured API extraction
-
-The local Candidate Assertion page can run either the bundled offline fixture or an
-OpenAI-compatible API. API configuration is read only from the process environment:
+Fixture extraction is the default reproducible demonstration. API extraction is
+optional and reads configuration only from the server process environment:
 
 - `PROOFLOOM_OPENAI_API_KEY` (required)
 - `PROOFLOOM_OPENAI_MODEL` (required)
-- `PROOFLOOM_OPENAI_ENDPOINT` (optional; defaults to `https://api.openai.com/v1/chat/completions`)
+- `PROOFLOOM_OPENAI_ENDPOINT` (optional complete chat-completions URL; defaults
+  to `https://api.openai.com/v1/chat/completions`)
 - `PROOFLOOM_OPENAI_PROVIDER` (optional provenance label; defaults to `openai`)
 
-`PROOFLOOM_OPENAI_ENDPOINT` is the complete chat-completions URL. Compatible providers
-can be selected by changing these environment values; the extraction and validation
-workflow is unchanged. The legacy `PROOFLOOM_OPENAI_BASE_URL` remains supported when
-`PROOFLOOM_OPENAI_ENDPOINT` is unset; ProofLoom appends `/chat/completions` to it.
-The API key is sent only in the `Authorization` request header and is not stored in a
-Knowledge Project or rendered in the UI.
+`PROOFLOOM_OPENAI_BASE_URL` remains supported when `PROOFLOOM_OPENAI_ENDPOINT`
+is unset; ProofLoom appends `/chat/completions`. The key is sent only in the
+Authorization request header and is not stored in project files or rendered in
+the UI. Plain HTTP endpoints are allowed only on localhost or a loopback address.
+
+## Development checks
+
+With the checkout installed (or with `PYTHONPATH=src`):
+
+```console
+python -m unittest discover -s tests -v
+python -m compileall -q src tests
+```
+
+Schemas and offline fixtures are package data declared in `pyproject.toml`, so
+they remain available when ProofLoom is installed outside the checkout.
+
+## Scope and release decisions
+
+v0.1 intentionally excludes authentication, cloud hosting, multi-user roles,
+non-Markdown import, Neo4j, general plugin infrastructure, and learning or Q&A
+agents. Code, schemas, prompts, and original/synthetic examples may be public;
+third-party tutorial source material and user-local project data are not shipped.
+
+ProofLoom is a working name. License selection and name, repository, package,
+and trademark availability remain owner decisions required before a formal
+public release.

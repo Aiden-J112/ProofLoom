@@ -164,31 +164,49 @@ class FixtureExtractor:
                     return entity
             return None
 
-        subject = resolve_entity(_FIXTURE["subject_name"])
-        obj = resolve_entity(_FIXTURE["object_name"])
-        evidence_locator = _FIXTURE["evidence"]
-        evidence = next(
-            (
-                fragment for fragment in fragments
-                if isinstance(fragment, dict)
-                and fragment.get("source_file") == evidence_locator["source_file"]
-                and fragment.get("heading_path") == evidence_locator["heading_path"]
-                and fragment.get("ordinal") == evidence_locator["ordinal"]
-            ),
-            None,
-        )
-        subject_id = str(subject["id"]) if subject and isinstance(subject.get("id"), str) else f"fixture.unresolved.subject:{_FIXTURE['subject_name']}"
-        object_id = str(obj["id"]) if obj and isinstance(obj.get("id"), str) else f"fixture.unresolved.object:{_FIXTURE['object_name']}"
-        heading_locator = "/".join(map(str, evidence_locator["heading_path"]))
-        evidence_id = str(evidence["id"]) if evidence and isinstance(evidence.get("id"), str) else f"fixture.unresolved.evidence:{evidence_locator['source_file']}#{heading_locator}:p{evidence_locator['ordinal']}"
-        predicate = _FIXTURE["predicate"]
-        digest = hashlib.sha256(f"{subject_id}\0{predicate}\0{object_id}\0{evidence_id}".encode()).hexdigest()[:24]
         generated_at = self._clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        return [{
-            "id": f"ast_fixture_{digest}", "subject_id": subject_id, "predicate": predicate, "object_id": object_id,
-            "primary_evidence_id": evidence_id, "supporting_evidence_ids": [], "status": "candidate",
-            "extraction": {"provider": _FIXTURE["provider"], "model": _FIXTURE["model"], "prompt_version": _FIXTURE["prompt_version"], "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "fixture"},
-        }]
+        recipes = [_FIXTURE, *_FIXTURE.get("additional_recipes", [])]
+
+        def locate(recipe: dict[str, object]) -> dict[str, object] | None:
+            locator = recipe["evidence"]
+            assert isinstance(locator, dict)
+            return next(
+                (
+                    fragment
+                    for fragment in fragments
+                    if isinstance(fragment, dict)
+                    and fragment.get("source_file") == locator["source_file"]
+                    and fragment.get("heading_path") == locator["heading_path"]
+                    and fragment.get("ordinal") == locator["ordinal"]
+                ),
+                None,
+            )
+
+        matched = [(recipe, locate(recipe)) for recipe in recipes]
+        selected = [(recipe, evidence) for recipe, evidence in matched if evidence]
+        if not selected:
+            selected = [matched[0]]
+
+        candidates = []
+        for recipe, evidence in selected:
+            subject_name = str(recipe["subject_name"])
+            object_name = str(recipe["object_name"])
+            subject = resolve_entity(subject_name)
+            obj = resolve_entity(object_name)
+            evidence_locator = recipe["evidence"]
+            assert isinstance(evidence_locator, dict)
+            subject_id = str(subject["id"]) if subject and isinstance(subject.get("id"), str) else f"fixture.unresolved.subject:{subject_name}"
+            object_id = str(obj["id"]) if obj and isinstance(obj.get("id"), str) else f"fixture.unresolved.object:{object_name}"
+            heading_locator = "/".join(map(str, evidence_locator["heading_path"]))
+            evidence_id = str(evidence["id"]) if evidence and isinstance(evidence.get("id"), str) else f"fixture.unresolved.evidence:{evidence_locator['source_file']}#{heading_locator}:p{evidence_locator['ordinal']}"
+            predicate = str(recipe["predicate"])
+            digest = hashlib.sha256(f"{subject_id}\0{predicate}\0{object_id}\0{evidence_id}".encode()).hexdigest()[:24]
+            candidates.append({
+                "id": f"ast_fixture_{digest}", "subject_id": subject_id, "predicate": predicate, "object_id": object_id,
+                "primary_evidence_id": evidence_id, "supporting_evidence_ids": [], "status": "candidate",
+                "extraction": {"provider": _FIXTURE["provider"], "model": recipe.get("model", _FIXTURE["model"]), "prompt_version": _FIXTURE["prompt_version"], "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "fixture"},
+            })
+        return candidates
 
 
 def validate_candidates(candidates: object, dictionary: object, fragments: object) -> list[dict[str, object]]:
