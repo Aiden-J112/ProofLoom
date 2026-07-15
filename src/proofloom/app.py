@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from proofloom.assertions import ExtractionError, FixtureExtractor, OpenAICompatibleExtractor, TYPE_CONTRACTS, append_new_candidates, prepare_extracted_candidates, validate_candidates, write_extraction_results
+from proofloom.configuration import ConfigurationError, load_runtime_configuration
 from proofloom.entities import (
     ENTITY_TYPES,
     EntityConflictError,
@@ -301,7 +302,7 @@ def _assertion_page(project_path: Path, csrf_token: str) -> bytes:
         outcome = "valid" if item.get("valid") else "; ".join(f"{reason['field']}: {reason['reason']}" for reason in item.get("reasons", []))
         validation_items.append(f"<li>{html.escape(str(item.get('candidate_id')))}: {html.escape(outcome)}</li>")
     project = html.escape(str(project_path))
-    return _page("<h2>Candidate Assertions</h2>" '<form method="post" action="/assertions/extract-fixture">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run offline synthetic fixture extraction</button></form>' '<form method="post" action="/assertions/extract-api">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run configured API extraction</button></form>' f"{''.join(cards) or '<p>No valid Candidate Assertions.</p>'}" f"<h2>Validation output</h2><ul>{''.join(validation_items) or '<li>Not run.</li>'}</ul>")
+    return _page("<h2>Candidate Assertions</h2>" '<form method="post" action="/assertions/extract-fixture">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run offline synthetic fixture extraction</button></form>' '<form method="post" action="/assertions/extract-api">' f'{_csrf_field(csrf_token)}<input type="hidden" name="project" value="{project}"><button type="submit">Run configured LLM extraction</button></form>' f"{''.join(cards) or '<p>No valid Candidate Assertions.</p>'}" f"<h2>Validation output</h2><ul>{''.join(validation_items) or '<li>Not run.</li>'}</ul>")
 
 
 def _entity_dictionary_page(
@@ -840,13 +841,13 @@ class ProofLoomRequestHandler(BaseHTTPRequestHandler):
 
 
 class ProofLoomServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], browse_root: Path):
+    def __init__(self, address: tuple[str, int], browse_root: Path, configured_extractor=None):
         self.browse_root = browse_root.expanduser().resolve()
         self.csrf_token = secrets.token_urlsafe(32)
         self.entity_dictionary_lock = threading.Lock()
         self.assertion_lock = threading.Lock()
         self.fixture_extractor = FixtureExtractor()
-        self.api_extractor = None
+        self.api_extractor = configured_extractor
         super().__init__(address, ProofLoomRequestHandler)
 
 
@@ -854,19 +855,21 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     browse_root: Path | None = None,
+    configured_extractor=None,
 ) -> ProofLoomServer:
     if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
         raise ValueError("ProofLoom may only bind to a loopback address")
-    return ProofLoomServer((host, port), browse_root or Path.home())
+    return ProofLoomServer((host, port), browse_root or Path.home(), configured_extractor)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local ProofLoom interface")
     parser.add_argument("command", nargs="?", choices=("serve", "check"), default="serve")
     parser.add_argument("project", nargs="?", type=Path)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--browse-root", type=Path, default=Path.home())
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--host")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--browse-root", type=Path)
     args = parser.parse_args()
     if args.command == "check":
         if args.project is None:
@@ -882,8 +885,16 @@ def main() -> None:
         return
     if args.project is not None:
         parser.error("serve does not accept a project path")
-    server = create_server(args.host, args.port, browse_root=args.browse_root)
-    print(f"ProofLoom is available at http://{args.host}:{server.server_port}")
+    try:
+        configured = load_runtime_configuration(args.config) if args.config else None
+    except ConfigurationError as error:
+        parser.error(str(error))
+    host = args.host or (configured.host if configured else "127.0.0.1")
+    port = args.port if args.port is not None else (configured.port if configured else 8000)
+    browse_root = args.browse_root or (configured.browse_root if configured else Path.home())
+    extractor = configured.extractor if configured else None
+    server = create_server(host, port, browse_root=browse_root, configured_extractor=extractor)
+    print(f"ProofLoom is available at http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -24,7 +24,7 @@
         "prompt_version": {"type": "string", "minLength": 1},
         "schema_version": {"const": "1"},
         "generated_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"},
-        "mode": {"enum": ["fixture", "api"]}
+        "mode": {"enum": ["fixture", "api", "codex-cli"]}
       }
     }
   }

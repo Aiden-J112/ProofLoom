@@ -11,5 +11,6 @@ demo-project/
 build/
 dist/
 *.egg-info/
+proofloom.local.json
 __pycache__/
 *.py[cod]

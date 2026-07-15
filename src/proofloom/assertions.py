@@ -5,6 +5,7 @@ import ipaddress
 import json
 import math
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from importlib.resources import files
@@ -31,6 +32,37 @@ TYPE_CONTRACTS = {
 }
 
 PROMPT_VERSION = "1"
+
+_CODEX_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates"],
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id", "subject_id", "predicate", "object_id",
+                    "primary_evidence_id", "supporting_evidence_ids",
+                ],
+                "properties": {
+                    "id": {"type": "string", "minLength": 1},
+                    "subject_id": {"type": "string", "minLength": 1},
+                    "predicate": {"enum": list(TYPE_CONTRACTS)},
+                    "object_id": {"type": "string", "minLength": 1},
+                    "primary_evidence_id": {"type": "string", "minLength": 1},
+                    "supporting_evidence_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "uniqueItems": True,
+                    },
+                },
+            },
+        }
+    },
+}
 
 
 class ExtractionError(ValueError):
@@ -141,6 +173,85 @@ class OpenAICompatibleExtractor:
         return [dict(item, status="candidate", extraction=dict(provenance)) if isinstance(item, dict) else item for item in items]
 
 
+class CodexCliExtractor:
+    """Candidate-only adapter for an authenticated local Codex CLI."""
+
+    def __init__(self, model: str, reasoning: str, *, timeout: float = 120, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        if not all(isinstance(value, str) and value.strip() for value in (model, reasoning)):
+            raise ExtractionError("Codex model and reasoning must be non-empty")
+        if reasoning not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ExtractionError("Codex reasoning must be one of minimal, low, medium, high, or xhigh")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ExtractionError("timeout must be a positive finite number")
+        self.model = model
+        self.reasoning = reasoning
+        self._timeout = timeout
+        self._runner = runner
+        self._clock = clock
+
+    def extract(self, dictionary: dict[str, object], fragments: list[dict[str, object]]) -> list[object]:
+        prompt = (
+            "Propose Candidate Assertions only; never accepted knowledge and never a Query Graph. "
+            "Use only IDs from the supplied Entity Dictionary and Source Fragments. "
+            "Return an object matching the provided output schema.\n\n"
+            + json.dumps(
+                {"entity_dictionary": dictionary, "source_fragments": fragments},
+                ensure_ascii=False,
+            )
+        )
+        with tempfile.TemporaryDirectory(prefix="proofloom-codex-") as temporary_name:
+            isolated = Path(temporary_name)
+            schema_path = isolated / "candidate-output.schema.json"
+            output_path = isolated / "candidate-output.json"
+            schema_path.write_text(json.dumps(_CODEX_OUTPUT_SCHEMA), encoding="utf-8")
+            command = [
+                "codex", "exec", "--ephemeral", "--sandbox", "read-only",
+                "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
+                "--model", self.model, "-c", f'model_reasoning_effort="{self.reasoning}"',
+                "--output-schema", str(schema_path), "-o", str(output_path), "-",
+            ]
+            try:
+                completed = self._runner(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    cwd=isolated,
+                    timeout=self._timeout,
+                    check=False,
+                )
+            except FileNotFoundError:
+                raise ExtractionError("Codex CLI executable was not found") from None
+            except subprocess.TimeoutExpired:
+                raise ExtractionError("Codex CLI extraction timed out") from None
+            except OSError as error:
+                raise ExtractionError(f"Codex CLI could not start: {type(error).__name__}") from None
+            if completed.returncode != 0:
+                raise ExtractionError(f"Codex CLI extraction failed with exit status {completed.returncode}")
+            try:
+                output = json.loads(output_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                raise ExtractionError("Codex CLI did not produce structured output") from None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ExtractionError("Codex CLI structured output is invalid JSON") from None
+        items = output.get("candidates") if isinstance(output, dict) else None
+        if not isinstance(items, list):
+            raise ExtractionError("Codex CLI structured output field candidates must be an array")
+        provenance = {
+            "provider": "codex-cli",
+            "model": self.model,
+            "prompt_version": PROMPT_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": self._clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "mode": "codex-cli",
+        }
+        return [
+            dict(item, status="candidate", extraction=dict(provenance))
+            if isinstance(item, dict) else item
+            for item in items
+        ]
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -228,8 +339,8 @@ def validate_candidates(candidates: object, dictionary: object, fragments: objec
             reasons.append({"field": field, "reason": error.message, "rule": "schema"})
         if isinstance(candidate, dict):
             extraction = candidate.get("extraction")
-            if candidate.get("replaces_assertion_id") is not None and isinstance(extraction, dict) and extraction.get("mode") == "api":
-                reasons.append({"field": "replaces_assertion_id", "reason": "API extraction cannot create replacement lineage; replacements require a Review Event", "rule": "reserved"})
+            if candidate.get("replaces_assertion_id") is not None and isinstance(extraction, dict) and extraction.get("mode") in {"api", "codex-cli"}:
+                reasons.append({"field": "replaces_assertion_id", "reason": "LLM extraction cannot create replacement lineage; replacements require a Review Event", "rule": "reserved"})
             subject = entities.get(str(candidate.get("subject_id", "")))
             obj = entities.get(str(candidate.get("object_id", "")))
             if subject is None:

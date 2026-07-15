@@ -1,0 +1,13 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "browse_root": "."
+  },
+  "llm": {
+    "backend": "codex-cli",
+    "model": "gpt-5.6-luna",
+    "reasoning": "medium",
+    "timeout": 120
+  }
+}
