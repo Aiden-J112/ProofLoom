@@ -205,9 +205,17 @@ class CodexCliExtractor:
             output_path = isolated / "candidate-output.json"
             schema_path.write_text(json.dumps(_CODEX_OUTPUT_SCHEMA), encoding="utf-8")
             command = [
-                "codex", "exec", "--ephemeral", "--sandbox", "read-only",
-                "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
-                "--model", self.model, "-c", f'model_reasoning_effort="{self.reasoning}"',
+                "codex", "exec", "--ephemeral", "--skip-git-repo-check",
+                "--ignore-user-config", "--ignore-rules", "--strict-config",
+                "--model", self.model,
+                "-c", f'model_reasoning_effort="{self.reasoning}"',
+                "-c", 'default_permissions="proofloom"',
+                "-c", 'permissions.proofloom.filesystem.":minimal"="read"',
+                "-c", 'permissions.proofloom.filesystem.":workspace_roots"="read"',
+                "-c", "permissions.proofloom.network.enabled=false",
+                "-c", 'web_search="disabled"',
+                "-c", 'shell_environment_policy.inherit="none"',
+                "-c", "allow_login_shell=false",
                 "--output-schema", str(schema_path), "-o", str(output_path), "-",
             ]
             try:

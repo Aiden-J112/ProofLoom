@@ -32,7 +32,7 @@ class RuntimeConfigCliTests(unittest.TestCase):
             root = Path(root_name)
             config_path = root / "launch.json"
             config_path.write_text(json.dumps({
-                "server": {"host": "localhost", "port": 4321, "browse_root": "."},
+                "server": {"host": "LOCALHOST", "port": 4321, "browse_root": "."},
                 "llm": {"backend": "codex-cli", "model": "gpt-5.6-luna", "reasoning": "medium"},
             }), encoding="utf-8")
             captured = {}
@@ -141,9 +141,21 @@ class CodexCliExtractionTests(unittest.TestCase):
             command = captured["command"]
             self.assertEqual("codex", command[0])
             self.assertEqual("exec", command[1])
-            for flag in ("--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--output-schema", "-o"):
+            for flag in ("--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--strict-config", "--output-schema", "-o"):
                 self.assertIn(flag, command)
-            self.assertEqual("read-only", command[command.index("--sandbox") + 1])
+            self.assertNotIn("--sandbox", command)
+            config_values = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value in {"-c", "--config"}
+            ]
+            self.assertIn('default_permissions="proofloom"', config_values)
+            self.assertIn('permissions.proofloom.filesystem.":minimal"="read"', config_values)
+            self.assertIn('permissions.proofloom.filesystem.":workspace_roots"="read"', config_values)
+            self.assertIn("permissions.proofloom.network.enabled=false", config_values)
+            self.assertIn('web_search="disabled"', config_values)
+            self.assertIn('shell_environment_policy.inherit="none"', config_values)
+            self.assertIn("allow_login_shell=false", config_values)
             self.assertEqual("gpt-5.6-luna", command[command.index("--model") + 1])
             self.assertIn('model_reasoning_effort="medium"', command)
             self.assertEqual("-", command[-1])

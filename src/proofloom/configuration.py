@@ -38,6 +38,8 @@ def load_runtime_configuration(path: Path) -> RuntimeConfiguration:
     browse_value = server.get("browse_root", str(Path.home()))
     if not isinstance(host, str) or not host.strip() or not _is_loopback(host):
         raise ConfigurationError("server.host must be localhost or a loopback IP address")
+    if host.casefold() == "localhost":
+        host = "localhost"
     if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
         raise ConfigurationError("server.port must be an integer from 0 through 65535")
     if not isinstance(browse_value, str) or not browse_value.strip():
