@@ -136,13 +136,13 @@ class FixtureExtractionTests(unittest.TestCase):
             self.assertIn(valid["id"], duplicate_reasons[0]["reason"])
             self.assertEqual(valid["id"], result["candidate"]["id"])
 
-    def test_unresolved_evidence_placeholder_is_derived_from_fixture_locator(self):
-        from proofloom import assertions
-        locator = {"source_file": "custom.md", "heading_path": ["One", "Two"], "ordinal": 7}
-        with mock.patch.dict(assertions._FIXTURE["evidence"], locator, clear=True):
-            candidate = FixtureExtractor(clock=lambda: NOW).extract(dictionary(), [fragments()[0]])[0]
+    def test_unresolved_evidence_placeholder_uses_the_default_recipe_locator(self):
+        unrelated = dict(fragments()[0], source_file="other.md")
+        candidate = FixtureExtractor(clock=lambda: NOW).extract(
+            dictionary(), [unrelated]
+        )[0]
         self.assertEqual(
-            "fixture.unresolved.evidence:custom.md#One/Two:p7",
+            "fixture.unresolved.evidence:synthetic-signal.md#Signal lesson:p1",
             candidate["primary_evidence_id"],
         )
 

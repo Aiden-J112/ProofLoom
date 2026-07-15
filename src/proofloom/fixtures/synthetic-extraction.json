@@ -1,17 +1,19 @@
 {
   "fixture_version": "1",
   "provider": "proofloom",
-  "model": "synthetic-signal-v1",
   "prompt_version": "fixture-1",
-  "predicate": "VERIFIES",
-  "subject_name": "Output Inspector",
-  "object_name": "Inspection Report",
-  "evidence": {
-    "source_file": "synthetic-signal.md",
-    "heading_path": ["Signal lesson"],
-    "ordinal": 1
-  },
-  "additional_recipes": [
+  "recipes": [
+    {
+      "model": "synthetic-signal-v1",
+      "predicate": "VERIFIES",
+      "subject_name": "Output Inspector",
+      "object_name": "Inspection Report",
+      "evidence": {
+        "source_file": "synthetic-signal.md",
+        "heading_path": ["Signal lesson"],
+        "ordinal": 1
+      }
+    },
     {
       "model": "synthetic-workflow-v1",
       "predicate": "VERIFIES",

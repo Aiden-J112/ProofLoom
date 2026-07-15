@@ -19,7 +19,7 @@ SCHEMA_VERSION = "1"
 _SCHEMA = json.loads(files("proofloom").joinpath("schemas/candidate-assertion.schema.json").read_text(encoding="utf-8"))
 Draft202012Validator.check_schema(_SCHEMA)
 _VALIDATOR = Draft202012Validator(_SCHEMA, format_checker=FormatChecker())
-_FIXTURE = json.loads(files("proofloom").joinpath("fixtures/synthetic-extraction.json").read_text(encoding="utf-8"))
+_FIXTURE_CATALOG = json.loads(files("proofloom").joinpath("fixtures/synthetic-extraction.json").read_text(encoding="utf-8"))
 
 TYPE_CONTRACTS = {
     "COMPOSED_OF": {("Concept", "Component")},
@@ -165,7 +165,7 @@ class FixtureExtractor:
             return None
 
         generated_at = self._clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        recipes = [_FIXTURE, *_FIXTURE.get("additional_recipes", [])]
+        recipes = _FIXTURE_CATALOG["recipes"]
 
         def locate(recipe: dict[str, object]) -> dict[str, object] | None:
             locator = recipe["evidence"]
@@ -204,7 +204,7 @@ class FixtureExtractor:
             candidates.append({
                 "id": f"ast_fixture_{digest}", "subject_id": subject_id, "predicate": predicate, "object_id": object_id,
                 "primary_evidence_id": evidence_id, "supporting_evidence_ids": [], "status": "candidate",
-                "extraction": {"provider": _FIXTURE["provider"], "model": recipe.get("model", _FIXTURE["model"]), "prompt_version": _FIXTURE["prompt_version"], "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "fixture"},
+                "extraction": {"provider": _FIXTURE_CATALOG["provider"], "model": recipe["model"], "prompt_version": _FIXTURE_CATALOG["prompt_version"], "schema_version": SCHEMA_VERSION, "generated_at": generated_at, "mode": "fixture"},
             })
         return candidates
 
