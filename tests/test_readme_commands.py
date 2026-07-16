@@ -38,6 +38,61 @@ class ReadmeCommandTests(unittest.TestCase):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual("proofloom.app:main", pyproject["project"]["scripts"]["proofloom"])
 
+    def test_readme_documents_copyable_local_json_startup(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for command in (
+            r"Copy-Item .\proofloom.example.json .\proofloom.local.json",
+            r".venv\Scripts\proofloom.exe --config .\proofloom.local.json",
+            "cp ./proofloom.example.json ./proofloom.local.json",
+            ".venv/bin/proofloom --config ./proofloom.local.json",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, readme)
+        self.assertIn("proofloom.local.json", readme)
+        self.assertIn(".gitignore", readme)
+
+    def test_readme_documents_the_governed_web_workflow(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for text in (
+            "本机回环地址",
+            "不是上传到云端",
+            "Inspector | Component",
+            "Inspection Report | Artifact",
+            "Safety Gate | Component",
+            "Risky Command | Artifact",
+            "accept",
+            "reject",
+            "replace",
+            "needs_domain_review",
+            "COMPOSED_OF",
+            "PROMPTS",
+            "CALLS_TOOL",
+            "PRODUCES",
+            "VERIFIES",
+            "BLOCKS",
+            "只有当前有效且已接受",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, readme)
+
+    def test_readme_documents_codex_and_openai_compatible_modes(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for text in (
+            "codex login status",
+            "0.144.5",
+            '"backend": "codex-cli"',
+            '"model": "gpt-5.6-luna"',
+            '"reasoning": "medium"',
+            '"backend": "openai-compatible"',
+            '"api_key"',
+            '"endpoint"',
+            '"base_url"',
+            '"provider"',
+            '"timeout"',
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, readme)
+
 
 if __name__ == "__main__":
     unittest.main()
