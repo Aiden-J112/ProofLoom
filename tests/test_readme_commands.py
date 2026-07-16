@@ -83,6 +83,17 @@ class ReadmeCommandTests(unittest.TestCase):
                 self.assertIn(text, readme)
         self.assertNotIn("点击 **Import Markdown**", readme)
 
+    def test_readme_explains_source_fragment_storage_privacy(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for text in (
+            "原始 Markdown 文件本身不会被复制",
+            "解析出的 Source Fragment（包含原文片段）会保存到 Knowledge Project 的 `.proofloom/`",
+            "项目数据也应按敏感资料保护",
+            "不得提交或公开",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, readme)
+
     def test_readme_documents_codex_and_openai_compatible_modes(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for text in (
