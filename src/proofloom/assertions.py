@@ -59,7 +59,6 @@ _CODEX_OUTPUT_SCHEMA = {
                     "supporting_evidence_ids": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
-                        "uniqueItems": True,
                     },
                 },
             },

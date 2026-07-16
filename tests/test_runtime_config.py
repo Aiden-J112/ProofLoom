@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from proofloom.app import main
-from proofloom.assertions import CodexCliExtractor, OpenAICompatibleExtractor
+from proofloom.assertions import CodexCliExtractor, OpenAICompatibleExtractor, validate_candidates
 from proofloom.entities import write_dictionary
 
 from test_api_extraction import model_candidate
@@ -214,6 +214,7 @@ class CodexCliExtractionTests(unittest.TestCase):
             self.assertFalse(captured.get("shell", False))
             self.assertEqual(120, captured["timeout"])
             self.assertEqual("object", captured["schema"]["type"])
+            self.assertNotIn("uniqueItems", json.dumps(captured["schema"]))
 
             persisted = json.loads((project / ".proofloom" / "candidate-assertions.json").read_text(encoding="utf-8"))
             self.assertEqual("candidate", persisted[0]["status"])
@@ -223,6 +224,17 @@ class CodexCliExtractionTests(unittest.TestCase):
                 "generated_at": "2026-01-02T03:04:05Z", "mode": "codex-cli",
             }, persisted[0]["extraction"])
             self.assertFalse((project / ".proofloom" / "query-graph.json").exists())
+            duplicate_support = dict(
+                persisted[0], supporting_evidence_ids=["src_signal", "src_signal"]
+            )
+            governed = validate_candidates(
+                [duplicate_support], dictionary(), fragments()
+            )[0]
+            self.assertFalse(governed["valid"])
+            self.assertTrue(any(
+                reason["field"] == "supporting_evidence_ids" and reason["rule"] == "schema"
+                for reason in governed["reasons"]
+            ))
 
     def test_codex_failures_are_safe_and_never_expose_process_output(self):
         def no_output(command, **kwargs):
