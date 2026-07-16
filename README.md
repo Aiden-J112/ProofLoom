@@ -167,14 +167,15 @@ New-Item -ItemType Directory -Force .\demo-project
 在 **Create a Knowledge Project** 中：
 
 1. 填写项目名，例如 `Synthetic Demo`。
-2. 选择仓库下的 `demo-project` 目录。
-3. 点击 **Create project**。
+2. 点击 **Choose a directory**。
+3. 在目录浏览页进入仓库下的 `demo-project`，点击 **Use this directory**。
+4. 回到创建表单后点击 **Create project**。
 
-下次启动后，使用 **Open a Knowledge Project** 选择同一目录即可恢复项目。
+下次启动后，在 **Open a Knowledge Project** 中点击 **Choose a project directory**，进入 `demo-project` 并点击 **Use this directory**，最后点击 **Open project** 即可恢复项目。
 
 ### 3. 从本地目录导入 Markdown
 
-点击 **Import Markdown**，选择仓库下的 `examples/synthetic-workflow` 目录，再点击 **Import selected source**。这里是从本机目录读取，不是浏览器向云端上传。项目页应显示来自 `inspection.md` 和 `safety.md` 的可定位 Source Fragment。
+在项目页的 **Import Markdown** 标题下点击 **Choose Markdown source**，进入仓库下的 `examples/synthetic-workflow` 目录，再点击 **Import selected source**。这里是从本机目录读取，不是浏览器向云端上传。项目页应显示来自 `inspection.md` 和 `safety.md` 的可定位 Source Fragment。
 
 ### 4. 维护受控 Entity Dictionary
 

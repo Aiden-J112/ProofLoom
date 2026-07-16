@@ -56,6 +56,13 @@ class ReadmeCommandTests(unittest.TestCase):
         for text in (
             "本机回环地址",
             "不是上传到云端",
+            "Choose a directory",
+            "Choose a project directory",
+            "Use this directory",
+            "Create project",
+            "Open project",
+            "Choose Markdown source",
+            "Import selected source",
             "Inspector | Component",
             "Inspection Report | Artifact",
             "Safety Gate | Component",
@@ -74,6 +81,7 @@ class ReadmeCommandTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIn(text, readme)
+        self.assertNotIn("点击 **Import Markdown**", readme)
 
     def test_readme_documents_codex_and_openai_compatible_modes(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
