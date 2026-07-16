@@ -195,8 +195,11 @@ class CodexCliExtractionTests(unittest.TestCase):
                 if value in {"-c", "--config"}
             ]
             self.assertIn('default_permissions="proofloom"', config_values)
-            self.assertIn('permissions.proofloom.filesystem.":minimal"="read"', config_values)
-            self.assertIn('permissions.proofloom.filesystem.":workspace_roots"="read"', config_values)
+            self.assertIn(
+                'permissions.proofloom.filesystem={":minimal"="read", ":workspace_roots"="read"}',
+                config_values,
+            )
+            self.assertFalse(any('filesystem.":' in value for value in config_values))
             self.assertIn("permissions.proofloom.network.enabled=false", config_values)
             self.assertIn('web_search="disabled"', config_values)
             self.assertIn('shell_environment_policy.inherit="none"', config_values)
